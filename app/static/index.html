@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Practice Coach</title>
+  <link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🎙️ Voice Practice Coach</div>
+    <nav class="tabs">
+      <a href="#/record" data-route="record">Запись</a>
+      <a href="#/history" data-route="history">История</a>
+      <a href="#/progress" data-route="progress">Прогресс</a>
+    </nav>
+  </header>
+
+  <main id="app" class="app"></main>
+
+  <script src="/js/api.js"></script>
+  <script src="/js/views/record.js"></script>
+  <script src="/js/views/history.js"></script>
+  <script src="/js/views/session.js"></script>
+  <script src="/js/views/progress.js"></script>
+  <script src="/js/views/practice.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

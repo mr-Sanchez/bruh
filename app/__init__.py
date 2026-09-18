@@ -1,3 +1,3 @@
-"""English Speech Recorder — faithful transcription of imperfect spoken English."""
+"""Voice Practice Coach — faithful transcription plus Claude-based speech feedback."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

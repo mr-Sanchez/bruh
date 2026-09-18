@@ -4,6 +4,7 @@
 # App output
 recordings/
 logs/
+data/
 
 # Python
 __pycache__/

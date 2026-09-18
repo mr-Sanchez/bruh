@@ -17,7 +17,6 @@ from typing import Any, Dict
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import config, utils  # noqa: E402
-from app.recorder import peak_level  # noqa: E402
 from app.transcriber import (  # noqa: E402
     DeepgramTranscriber,
     MissingApiKeyError,
@@ -275,12 +274,35 @@ class FileLayoutTests(unittest.TestCase):
         self.assertEqual(utils.format_duration(763), "12:43")
         self.assertEqual(utils.format_duration(3723), "01:02:03")
 
+    def test_session_meta_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = utils.create_session(
+                Path(tmp), dt.datetime(2026, 9, 2, 18, 35, 20)
+            )
+            session.duration_seconds = 12.5
+            session.audio_filename = "audio.webm"
+            session.language_key = "ru"
+            session.status = utils.STATUS_DONE
+            utils.write_session_meta(session)
 
-class LevelMeterTests(unittest.TestCase):
-    def test_peak_level(self) -> None:
-        self.assertEqual(peak_level(b""), 0.0)
-        self.assertEqual(peak_level(b"\x00\x40", stride=1), 0.5)
-        self.assertEqual(peak_level(b"\x00\x80", stride=1), 1.0)
+            loaded = utils.read_session_meta(session.directory)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.audio_filename, "audio.webm")
+            self.assertEqual(loaded.language_key, "ru")
+            self.assertEqual(loaded.status, utils.STATUS_DONE)
+            self.assertAlmostEqual(loaded.duration_seconds, 12.5)
+            self.assertEqual(loaded.started_at, session.started_at)
+
+    def test_list_sessions_skips_directories_without_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = utils.create_session(root, dt.datetime(2026, 9, 2, 18, 35, 20))
+            utils.write_session_meta(session)
+            (root / "not-a-session").mkdir()
+
+            sessions = utils.list_sessions(root)
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0].directory, session.directory)
 
 
 class SdkContractTests(unittest.TestCase):

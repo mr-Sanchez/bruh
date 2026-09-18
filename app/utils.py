@@ -33,6 +33,13 @@ def format_duration(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+# Valid values for Session.status.
+STATUS_RECORDING = "recording"
+STATUS_TRANSCRIBING = "transcribing"
+STATUS_DONE = "done"
+STATUS_ERROR = "error"
+
+
 @dataclass
 class Session:
     """One recording session and the files that belong to it."""
@@ -41,10 +48,14 @@ class Session:
     started_at: dt.datetime
     duration_seconds: float = 0.0
     transcript: Optional[str] = None
+    audio_filename: str = config.DEFAULT_AUDIO_FILENAME
+    language_key: str = config.DEFAULT_LANGUAGE_KEY
+    status: str = STATUS_RECORDING
+    error_message: Optional[str] = None
 
     @property
-    def wav_path(self) -> Path:
-        return self.directory / config.WAV_FILENAME
+    def audio_path(self) -> Path:
+        return self.directory / self.audio_filename
 
     @property
     def transcript_path(self) -> Path:
@@ -55,8 +66,20 @@ class Session:
         return self.directory / config.RESPONSE_FILENAME
 
     @property
+    def analysis_path(self) -> Path:
+        return self.directory / config.ANALYSIS_FILENAME
+
+    @property
+    def session_meta_path(self) -> Path:
+        return self.directory / config.SESSION_META_FILENAME
+
+    @property
     def started_at_text(self) -> str:
         return self.started_at.strftime(HUMAN_TIME_FORMAT)
+
+    @property
+    def id(self) -> str:
+        return self.directory.name
 
 
 def create_session(root: Optional[Path] = None, when: Optional[dt.datetime] = None) -> Session:
@@ -72,6 +95,65 @@ def create_session(root: Optional[Path] = None, when: Optional[dt.datetime] = No
         unique = root / f"{when.strftime(SESSION_DIR_FORMAT)}_{suffix}"
     unique.mkdir(parents=True)
     return Session(directory=unique, started_at=when)
+
+
+def write_session_meta(session: Session) -> Path:
+    """Persist the session's state (status, language, file names) as JSON.
+
+    This is the authoritative record of where a session stands - it replaces
+    inferring state from which files happen to exist on disk.
+    """
+    payload = {
+        "started_at": session.started_at.isoformat(),
+        "duration_seconds": session.duration_seconds,
+        "audio_filename": session.audio_filename,
+        "language_key": session.language_key,
+        "status": session.status,
+        "error_message": session.error_message,
+    }
+    return write_json(session.session_meta_path, payload)
+
+
+def read_session_meta(directory: Path) -> Optional[Session]:
+    """Load a Session back from directory/session.json, or None if missing/corrupt."""
+    path = directory / config.SESSION_META_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        started_at = dt.datetime.fromisoformat(payload["started_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        logger.warning("Could not read session metadata at %s", path)
+        return None
+
+    session = Session(
+        directory=directory,
+        started_at=started_at,
+        duration_seconds=float(payload.get("duration_seconds", 0.0)),
+        audio_filename=payload.get("audio_filename", config.DEFAULT_AUDIO_FILENAME),
+        language_key=payload.get("language_key", config.DEFAULT_LANGUAGE_KEY),
+        status=payload.get("status", STATUS_DONE),
+        error_message=payload.get("error_message"),
+    )
+    if session.transcript_path.is_file():
+        session.transcript = read_transcript_body(session.transcript_path)
+    return session
+
+
+def list_sessions(root: Optional[Path] = None) -> list:
+    """All sessions under recordings/, newest first, that have session.json."""
+    root = root or config.recordings_dir()
+    if not root.is_dir():
+        return []
+    sessions = []
+    for directory in root.iterdir():
+        if not directory.is_dir():
+            continue
+        session = read_session_meta(directory)
+        if session is not None:
+            sessions.append(session)
+    sessions.sort(key=lambda s: s.started_at, reverse=True)
+    return sessions
 
 
 def write_transcript(

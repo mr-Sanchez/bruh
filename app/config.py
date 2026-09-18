@@ -15,7 +15,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Final, Optional
 
-APP_NAME: Final[str] = "English Speech Recorder"
+APP_NAME: Final[str] = "Voice Practice Coach"
 
 # --- Audio ---------------------------------------------------------------
 # 16 kHz / mono / 16-bit PCM is what Deepgram's models actually consume:
@@ -114,10 +114,71 @@ def default_profile() -> LanguageProfile:
 API_KEY_ENV_VAR: Final[str] = "DEEPGRAM_API_KEY"
 MISSING_API_KEY_MESSAGE: Final[str] = "DEEPGRAM_API_KEY is not configured."
 
+# --- Claude (speech analysis / feedback) ----------------------------------
+ANTHROPIC_API_KEY_ENV_VAR: Final[str] = "ANTHROPIC_API_KEY"
+MISSING_ANTHROPIC_API_KEY_MESSAGE: Final[str] = "ANTHROPIC_API_KEY is not configured."
+
+# Sonnet 5 keeps the cost of a daily analysis pass low (roughly $0.05-0.10 per
+# session) while still following the structured-feedback instructions well.
+# Swap to a different model here if quality ever needs to outweigh cost.
+ANALYSIS_MODEL: Final[str] = "claude-sonnet-5"
+# The coach-style feedback (per-mistake alternatives, an improved retelling,
+# takeaways, scores) is several times longer than a bare list of issues, and
+# adaptive thinking shares this budget - 16k leaves headroom without streaming.
+ANALYSIS_MAX_TOKENS: Final[int] = 16_000
+ANALYSIS_TIMEOUT_SECONDS: Final[int] = 300
+DEFAULT_ANALYSIS_EFFORT: Final[str] = "medium"
+
+
+def get_anthropic_api_key() -> Optional[str]:
+    """Return the Anthropic API key, or None when it is not configured."""
+    key = os.environ.get(ANTHROPIC_API_KEY_ENV_VAR, "").strip()
+    return key or None
+
+
+def analysis_effort() -> str:
+    """Thinking effort for the analysis call - a cost/quality knob.
+
+    Overridable via ANALYSIS_EFFORT (low|medium|high|xhigh|max) without a
+    code change.
+    """
+    return os.environ.get("ANALYSIS_EFFORT", DEFAULT_ANALYSIS_EFFORT).strip() or DEFAULT_ANALYSIS_EFFORT
+
+
 # --- File names ----------------------------------------------------------
+# Kept for the WAV-specific helpers/tests; the actual per-session audio file
+# name is whatever the browser recorded (see extension_for_mime below).
 WAV_FILENAME: Final[str] = "audio.wav"
+DEFAULT_AUDIO_FILENAME: Final[str] = "audio.webm"
 TRANSCRIPT_FILENAME: Final[str] = "transcript.txt"
 RESPONSE_FILENAME: Final[str] = "deepgram_response.json"
+ANALYSIS_FILENAME: Final[str] = "analysis.json"
+SESSION_META_FILENAME: Final[str] = "session.json"
+PROGRESS_FILENAME: Final[str] = "progress.json"
+
+# MediaRecorder mime types we expect from a browser, mapped to a file
+# extension. Deepgram auto-detects the container from the bytes, so this
+# mapping only needs to be good enough to give the file a sensible name.
+_AUDIO_EXTENSIONS_BY_MIME_PREFIX: Final[tuple] = (
+    ("audio/webm", ".webm"),
+    ("audio/ogg", ".ogg"),
+    ("audio/wav", ".wav"),
+    ("audio/x-wav", ".wav"),
+    ("audio/mp4", ".m4a"),
+    ("audio/mpeg", ".mp3"),
+)
+
+
+def extension_for_mime(mime_type: Optional[str]) -> str:
+    """Best-effort file extension for a browser-reported audio mime type."""
+    value = (mime_type or "").split(";", 1)[0].strip().lower()
+    for prefix, extension in _AUDIO_EXTENSIONS_BY_MIME_PREFIX:
+        if value == prefix:
+            return extension
+    logging.getLogger(__name__).warning(
+        "Unrecognised audio mime type %r; saving with a generic extension", mime_type
+    )
+    return ".audio"
 
 
 def base_dir() -> Path:
@@ -137,6 +198,11 @@ def recordings_dir() -> Path:
 
 def logs_dir() -> Path:
     return base_dir() / "logs"
+
+
+def data_dir() -> Path:
+    """Cross-session app data (currently just progress.json)."""
+    return base_dir() / "data"
 
 
 def load_environment() -> None:

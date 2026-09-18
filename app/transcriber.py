@@ -137,13 +137,17 @@ class DeepgramTranscriber:
     def profile(self) -> config.LanguageProfile:
         return self._profile
 
-    def transcribe(self, wav_path: Path) -> TranscriptionResult:
-        """Transcribe a local WAV file. Never modifies or deletes the file."""
+    def transcribe(self, audio_path: Path) -> TranscriptionResult:
+        """Transcribe a local audio file. Never modifies or deletes the file.
+
+        Deepgram auto-detects the container from the bytes, so this accepts
+        WAV, WebM/Opus, Ogg/Opus or anything else it recognises - not just WAV.
+        """
         if not self._api_key:
             raise MissingApiKeyError(config.MISSING_API_KEY_MESSAGE)
 
         try:
-            audio = wav_path.read_bytes()
+            audio = audio_path.read_bytes()
         except OSError as exc:
             raise TranscriptionError(f"Could not read the recording: {exc}") from exc
         if not audio:
@@ -153,7 +157,7 @@ class DeepgramTranscriber:
         logger.info(
             "Transcription started: %s (%.1f MB, model=%s, language=%s, "
             "filler_words=%s, punctuate=True, smart_format=False)",
-            wav_path,
+            audio_path,
             len(audio) / 1_048_576,
             profile.model,
             profile.language,
@@ -205,7 +209,7 @@ class DeepgramTranscriber:
             len(result.transcript),
         )
         if not result.transcript.strip():
-            logger.warning("Deepgram returned an empty transcript for %s", wav_path)
+            logger.warning("Deepgram returned an empty transcript for %s", audio_path)
         return result
 
     # --------------------------------------------------------------- errors
