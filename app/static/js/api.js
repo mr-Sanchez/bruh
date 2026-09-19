@@ -32,6 +32,23 @@ const Api = (() => {
       return request("/api/sessions", { method: "POST", body: form });
     },
 
+    getQueue: () => request("/api/learner/queue"),
+    getLearnerTopics: () => request("/api/learner/topics"),
+    getLearnerItems: ({ topic, dueOnly } = {}) => {
+      const params = new URLSearchParams();
+      if (topic) params.set("topic", topic);
+      if (dueOnly) params.set("due_only", "true");
+      return request(`/api/learner/items?${params}`);
+    },
+    getPracticeTexts: (topic) =>
+      request(`/api/learner/texts${topic ? `?topic=${encodeURIComponent(topic)}` : ""}`),
+    postAttempt: (attempt) =>
+      request("/api/learner/attempts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(attempt),
+      }),
+
     analyzeSession: (id, force = false) =>
       request(`/api/sessions/${encodeURIComponent(id)}/analyze`, {
         method: "POST",

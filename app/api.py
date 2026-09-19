@@ -17,9 +17,9 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app import config, progress_store, utils
+from app import config, learner_store, progress_store, utils
 from app.analyzer import (
     ANALYSIS_SCHEMA_VERSION,
     AnalysisError,
@@ -105,6 +105,12 @@ def _transcribe_session(
         utils.write_transcript(session, result.transcript, profile)
         session.transcript = result.transcript
         session.status = utils.STATUS_DONE
+        # Deepgram bills by audio length; its own metadata.duration is the
+        # figure it bills on (the app still never decodes audio itself).
+        audio_seconds = result.audio_duration or session.duration_seconds
+        learner_store.record_deepgram_usage(
+            "transcription", profile.key, audio_seconds, session_id=session.id
+        )
     except TranscriptionError as exc:
         logger.error("Transcription failed for %s: %s", session.id, exc)
         session.status = utils.STATUS_ERROR
@@ -235,6 +241,9 @@ def analyze_session(
     except AnalysisError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
+    usage_record = learner_store.record_claude_usage(
+        "analysis", result.model, result.usage, session_id=session.id
+    )
     analysis_payload: Dict[str, Any] = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
         "created_at": dt.datetime.now().isoformat(),
@@ -251,9 +260,10 @@ def analyze_session(
         "overall_score": result.overall_score,
         "topic_counts": result.topic_counts,
         "request_id": result.request_id,
+        "usage": {**result.usage, "cost_usd": usage_record["cost_usd"]},
     }
     utils.write_json(session.analysis_path, analysis_payload)
-    progress_store.record_analysis(session.id, result.topic_counts)
+    learner_store.refresh_after_analysis()
 
     return {"session_id": session.id, "analysis": analysis_payload, "progress_updated": True}
 
@@ -267,6 +277,7 @@ def get_progress() -> Dict[str, Any]:
         "sessions_analyzed": len(session_ids),
         "updated_at": data.get("updated_at"),
         "topics": progress_store.top_weak_topics(n=20),
+        "score_history": data.get("score_history", []),
     }
 
 
@@ -274,7 +285,119 @@ def get_progress() -> Dict[str, Any]:
 def get_topics() -> Dict[str, Any]:
     return {
         "topics": [
-            {"key": key, "label": info["label"], "description": info["description"]}
+            {
+                "key": key,
+                "label": info["label"],
+                "description": info["description"],
+                "resources": [
+                    {"title": title, "url": url}
+                    for title, url in config.TOPIC_RESOURCES.get(key, ())
+                ],
+                "has_cloze": key in config.CLOZE_WORDS,
+            }
             for key, info in progress_store.TOPIC_TAXONOMY.items()
         ]
     }
+
+
+# ---------------------------------------------------------------- /learner
+_SLUG_PATTERN = r"^[a-z][a-z0-9_]{0,39}$"
+
+
+_SESSION_ID_PATTERN = r"^[0-9A-Za-z_-]{1,64}$"
+
+
+class AttemptRequest(BaseModel):
+    """A card attempt names item_id and says whether it was right; a topic
+    drill names topic and gives its score - "correct" is derived from that."""
+
+    item_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    topic: Optional[str] = Field(default=None, pattern=_SLUG_PATTERN)
+    exercise: str = Field(pattern=_SLUG_PATTERN)
+    correct: Optional[bool] = None
+    score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    session_id: Optional[str] = Field(default=None, pattern=_SESSION_ID_PATTERN)
+    answer: Optional[str] = Field(default=None, max_length=4000)
+    context: Optional[str] = Field(default=None, pattern=_SLUG_PATTERN)
+
+
+@router.get("/learner/items")
+def get_learner_items(
+    due_only: bool = False, topic: Optional[str] = None, kind: Optional[str] = None
+) -> Dict[str, Any]:
+    """Bank items with their Leitner state; due_only gives today's review queue."""
+    today = dt.date.today()
+    bank = learner_store.load_item_bank()
+    states = learner_store.item_states(bank)
+    items = []
+    for item_id, item in bank["items"].items():
+        state = states[item_id]
+        if due_only and not state.is_due(today):
+            continue
+        if topic is not None and item.get("topic") != topic:
+            continue
+        if kind is not None and item.get("kind") != kind:
+            continue
+        items.append(learner_store.card(item, state, today))
+    items.sort(key=lambda entry: (entry["state"]["due"] or "9999", entry["id"]))
+    return {"today": today.isoformat(), "count": len(items), "items": items}
+
+
+@router.get("/learner/queue")
+def get_learner_queue() -> Dict[str, Any]:
+    """Today's cards: all due reviews plus the day's allowance of new ones."""
+    return learner_store.daily_queue()
+
+
+@router.post("/learner/attempts", status_code=201)
+def post_learner_attempt(body: AttemptRequest) -> Dict[str, Any]:
+    if (body.item_id is None) == (body.topic is None):
+        raise HTTPException(status_code=400, detail="Give exactly one of item_id or topic.")
+    if body.topic is not None:
+        if body.topic not in progress_store.TOPIC_TAXONOMY:
+            raise HTTPException(status_code=404, detail="Unknown topic.")
+        if body.score is None:
+            raise HTTPException(status_code=400, detail="A topic drill needs a score.")
+        attempt = learner_store.append_attempt(
+            None,
+            body.exercise,
+            body.score >= config.DRILL_PASS_SCORE,
+            topic=body.topic,
+            score=body.score,
+            session_id=body.session_id,
+            answer=body.answer,
+            context=body.context,
+        )
+        return {"attempt": attempt}
+
+    if body.correct is None:
+        raise HTTPException(status_code=400, detail="A card attempt needs correct.")
+    bank = learner_store.load_item_bank()
+    if body.item_id not in bank["items"]:
+        raise HTTPException(status_code=404, detail="Unknown item.")
+    attempt = learner_store.append_attempt(
+        body.item_id, body.exercise, body.correct, answer=body.answer, context=body.context
+    )
+    state = learner_store.item_states(bank)[body.item_id]
+    return {
+        "attempt": attempt,
+        "state": {**state.to_dict(), "is_due": state.is_due(dt.date.today())},
+    }
+
+
+@router.get("/learner/texts")
+def get_learner_texts(topic: Optional[str] = None) -> Dict[str, Any]:
+    """improved_version texts for cloze drills; with topic, their gaps too."""
+    if topic is not None and topic not in config.CLOZE_WORDS:
+        raise HTTPException(status_code=404, detail="No cloze drill for this topic.")
+    return {"topic": topic, "texts": learner_store.practice_texts(topic)}
+
+
+@router.get("/learner/topics")
+def get_learner_topics() -> Dict[str, Any]:
+    return {"topics": learner_store.topic_mastery()}
+
+
+@router.get("/usage")
+def get_usage() -> Dict[str, Any]:
+    return learner_store.usage_summary()

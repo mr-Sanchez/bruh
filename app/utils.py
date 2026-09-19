@@ -8,10 +8,11 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from app import config
 
@@ -180,10 +181,110 @@ def write_transcript(
 
 
 def write_json(path: Path, payload: Any) -> Path:
-    path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    """Write JSON atomically: a crash mid-write never leaves a half-written file.
+
+    The payload goes to a sibling temp file first and is then swapped in with
+    os.replace, which is atomic on the same filesystem (Windows included).
+    """
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
     return path
+
+
+def append_jsonl(path: Path, record: Dict[str, Any]) -> None:
+    """Append one JSON object as a line. Callers serialise concurrent appends."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Read every well-formed object line; bad lines are logged and skipped, never rewritten."""
+    if not path.is_file():
+        return []
+    records: List[Dict[str, Any]] = []
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                logger.warning("Skipping malformed line %d in %s", number, path)
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+    return records
+
+
+@dataclass(frozen=True)
+class AnalysedSession:
+    """One session's analysis plus when (and in which language) it was spoken."""
+
+    session_id: str
+    recorded_at: dt.datetime
+    language: str
+    analysis: Dict[str, Any]
+
+
+def iter_analysed_sessions(root: Optional[Path] = None) -> Iterator[AnalysedSession]:
+    """Every readable recordings/*/analysis.json, oldest recording first.
+
+    `recorded_at` is when the speech happened (session.json), not when it was
+    analysed, so re-analysing an old recording never looks like new speech.
+    """
+    root = root or config.recordings_dir()
+    if not root.is_dir():
+        return
+    found: List[AnalysedSession] = []
+    for directory in root.iterdir():
+        analysis_path = directory / config.ANALYSIS_FILENAME
+        if not analysis_path.is_file():
+            continue
+        try:
+            analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("Skipping unreadable analysis file: %s", analysis_path)
+            continue
+        if not isinstance(analysis, dict):
+            continue
+        meta = _read_raw_session_meta(directory)
+        recorded_at = _parse_datetime(meta.get("started_at")) or _parse_datetime(
+            analysis.get("created_at")
+        )
+        if recorded_at is None:
+            logger.warning("Skipping analysis with no usable date: %s", analysis_path)
+            continue
+        language = (
+            analysis.get("language") or meta.get("language_key") or config.DEFAULT_LANGUAGE_KEY
+        )
+        found.append(AnalysedSession(directory.name, recorded_at, language, analysis))
+    found.sort(key=lambda item: (item.recorded_at, item.session_id))
+    yield from found
+
+
+def _read_raw_session_meta(directory: Path) -> Dict[str, Any]:
+    path = directory / config.SESSION_META_FILENAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _parse_datetime(value: Any) -> Optional[dt.datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def read_transcript_body(path: Path) -> str:

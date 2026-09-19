@@ -155,6 +155,79 @@ RESPONSE_FILENAME: Final[str] = "deepgram_response.json"
 ANALYSIS_FILENAME: Final[str] = "analysis.json"
 SESSION_META_FILENAME: Final[str] = "session.json"
 PROGRESS_FILENAME: Final[str] = "progress.json"
+# Learner model (see app/learner_store.py). The item bank is a derived cache;
+# attempts and usage are append-only logs and are authoritative.
+ITEM_BANK_FILENAME: Final[str] = "item_bank.json"
+ATTEMPTS_FILENAME: Final[str] = "attempts.jsonl"
+USAGE_FILENAME: Final[str] = "usage.jsonl"
+
+# --- Learner model -------------------------------------------------------
+# Leitner boxes 1..5 and the review interval (days) after landing in each.
+LEITNER_INTERVALS_DAYS: Final[tuple] = (1, 2, 4, 8, 16)
+# An item in the last box is "closed" once this many later analysed
+# recordings in its language went by without the mistake coming back.
+LEITNER_CLOSE_AFTER_RECORDINGS: Final[int] = 3
+# New cards introduced per day (decided 2026-09-19: 7-10). The lower number
+# applies once more than REVIEW_BACKLOG_THRESHOLD reviews are due.
+NEW_ITEMS_PER_DAY_MAX: Final[int] = 10
+NEW_ITEMS_PER_DAY_MIN: Final[int] = 7
+REVIEW_BACKLOG_THRESHOLD: Final[int] = 30
+# Topic accuracy is measured over this many most recent attempts.
+TOPIC_ACCURACY_WINDOW: Final[int] = 20
+
+# --- Free drills (Stage 2, $0) ---------------------------------------------
+# A fix card is a sentence scramble while the item is new or in box 1 and its
+# correction has SCRAMBLE_MIN..SCRAMBLE_MAX words; typed recall after that.
+SCRAMBLE_MIN_WORDS: Final[int] = 3
+SCRAMBLE_MAX_WORDS: Final[int] = 16
+# Typed answers longer than this are compared by the learner, not by code:
+# exact matching a 20-word sentence fails on harmless variations.
+TYPED_CHECK_MAX_WORDS: Final[int] = 16
+# A topic drill (cloze) counts as "correct" in the attempts log at this share
+# of right gaps; its exact share is stored as `score` and feeds topic accuracy.
+DRILL_PASS_SCORE: Final[float] = 0.8
+# Cloze on improved_version: which words become gaps, per topic. "to" is left
+# out of prepositions on purpose - it is mostly the infinitive marker.
+CLOZE_WORDS: Final[dict] = {
+    "articles": ("a", "an", "the"),
+    "prepositions": (
+        "about", "after", "at", "before", "by", "during", "for", "from", "in",
+        "into", "of", "on", "over", "since", "through", "under", "until", "with",
+    ),
+}
+CLOZE_MAX_GAPS: Final[int] = 15
+
+# External references per topic: free online deep links, no API calls. No
+# textbook references - decided 2026-09-19, the learner does not study from books.
+_CAMBRIDGE_GRAMMAR: Final[str] = "https://dictionary.cambridge.org/grammar/british-grammar/"
+TOPIC_RESOURCES: Final[dict] = {
+    "verb_tense": (
+        ("Cambridge Grammar: Tenses and time", _CAMBRIDGE_GRAMMAR + "tenses-and-time"),
+        ("Cambridge Grammar: Conditionals", _CAMBRIDGE_GRAMMAR + "conditionals-and-wishes"),
+    ),
+    "articles": (("Cambridge Grammar: A/an and the", _CAMBRIDGE_GRAMMAR + "a-an-and-the"),),
+    "prepositions": (("Cambridge Grammar: Prepositions", _CAMBRIDGE_GRAMMAR + "prepositions"),),
+    "word_order": (("Cambridge Grammar: Word order", _CAMBRIDGE_GRAMMAR + "word-order-and-focus"),),
+    "subject_verb_agreement": (
+        ("Cambridge Grammar: Subject-verb agreement", _CAMBRIDGE_GRAMMAR + "subject-verb-agreement"),
+    ),
+    "sentence_structure": (
+        ("Cambridge Grammar: Relative clauses", _CAMBRIDGE_GRAMMAR + "relative-clauses"),
+    ),
+}
+
+# --- Pricing (estimates for the usage log, USD) --------------------------
+# Per million tokens: (input, output). Cache writes bill at 1.25x input,
+# cache reads at 0.1x input. Unknown models are logged with cost_usd = None.
+CLAUDE_PRICE_PER_MTOK: Final[dict] = {
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-opus-5": (5.00, 25.00),
+}
+CLAUDE_CACHE_WRITE_MULTIPLIER: Final[float] = 1.25
+CLAUDE_CACHE_READ_MULTIPLIER: Final[float] = 0.10
+# Deepgram pre-recorded pay-as-you-go, per audio minute, by language profile.
+DEEPGRAM_PRICE_PER_MINUTE: Final[dict] = {"en-US": 0.0043, "ru": 0.0043, "multi": 0.0052}
 
 # MediaRecorder mime types we expect from a browser, mapped to a file
 # extension. Deepgram auto-detects the container from the bytes, so this
@@ -201,7 +274,7 @@ def logs_dir() -> Path:
 
 
 def data_dir() -> Path:
-    """Cross-session app data (currently just progress.json)."""
+    """Cross-session app data: progress.json and the learner model files."""
     return base_dir() / "data"
 
 

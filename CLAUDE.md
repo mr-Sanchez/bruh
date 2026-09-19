@@ -31,13 +31,16 @@ app/config.py         single source of truth for paths, constants, LANGUAGE_PROF
 app/utils.py          Session dataclass (owns every per-session file path), fs + formatting helpers
 app/transcriber.py    Deepgram layer  — knows nothing about HTTP/FastAPI
 app/analyzer.py       Claude layer    — structured output, Russian feedback, topic tagging
-app/progress_store.py cross-session topic aggregation → data/progress.json
+app/progress_store.py cross-session topic aggregation + score history → data/progress.json
+app/learner_model.py  pure learner-model rules: item bank, Leitner state, topic mastery (no I/O)
+app/learner_store.py  the ONLY place learner-model files are read/written; usage/cost log
 app/static/           frontend: index.html, css/app.css, js/api.js, js/app.js (hash router),
+                      js/drill.js (card + cloze runners, checked in the browser),
                       js/views/{record,history,session,progress,practice}.js
 ```
 
-Layering rule: `api.py` orchestrates; `transcriber.py` / `analyzer.py` / `progress_store.py`
-stay framework-agnostic and are constructed through factory dependencies
+Layering rule: `api.py` orchestrates; `transcriber.py` / `analyzer.py` / `progress_store.py` /
+`learner_*.py` stay framework-agnostic and are constructed through factory dependencies
 (`get_transcriber_factory`, `get_analyzer_factory`) so tests can override them.
 
 ### Data on disk (created at runtime, all gitignored)
@@ -46,10 +49,17 @@ stay framework-agnostic and are constructed through factory dependencies
 recordings/<YYYY-MM-DD_HH-MM-SS>/   audio.webm, session.json, transcript.txt,
                                     deepgram_response.json, analysis.json
 data/progress.json                  derived cache — analysis.json files stay authoritative
+data/item_bank.json                 derived cache — items from every analysis.json
+data/attempts.jsonl                 append-only, AUTHORITATIVE — every exercise answer
+                                    (card: item_id; topic drill: topic + score)
+data/usage.jsonl                    append-only — tokens/minutes + estimated cost per paid call
 logs/app.log                        rotating, 1 MB × 4
 ```
 
-`progress_store.rebuild_from_sessions()` can always regenerate `progress.json`.
+`progress.json` and `item_bank.json` are fully rebuilt after every analysis
+(`learner_store.refresh_after_analysis()`), so a forced re-analysis replaces that session's
+counts, scores and items; both also rebuild themselves when missing or on a schema bump.
+`utils.write_json` is atomic (temp file + `os.replace`).
 New per-session filenames belong in `config.py` + a `Session` property in `utils.py`,
 never hard-coded at a call site.
 
@@ -80,6 +90,9 @@ separate, explicit user action.
 * **Missing key ⇒ graceful degradation.** A recording still uploads and is saved with a
   clear error status when `DEEPGRAM_API_KEY` is absent; the transcript still works when
   `ANTHROPIC_API_KEY` is absent.
+* **`attempts.jsonl` is never regenerated, rewritten or truncated** — it is the only record
+  that cannot be rebuilt. Item ids are content hashes (`learner_model.item_id`), so attempts
+  stay linked across re-analysis.
 * **Session ids are path segments from the URL** — `_session_directory()` rejects `/`,
   `\`, `.` and `..`. Keep that guard on any new session-scoped route.
 * **`TOPIC_TAXONOMY` is a closed set.** It drives the Claude schema (`Literal[TopicKey]`),
@@ -110,16 +123,21 @@ Everything is offline: no microphone, no browser, no network, no real keys.
   the **real** Deepgram SDK through an `httpx.MockTransport` to assert the exact request built.
 * `tests/test_analyzer.py` — fake Anthropic client via `client_factory`.
 * `tests/test_api.py` — `TestClient` + `app.dependency_overrides` with fake factories.
-* `tests/test_progress_store.py` — topic aggregation and scoring.
+* `tests/test_progress_store.py` — topic aggregation, scoring, score history.
+* `tests/test_learner_model.py` — pure bank / Leitner / mastery rules.
+* `tests/test_learner_store.py` — bank rebuild, attempts and usage logs on disk.
 
 Inject fakes through `client_factory` (library layer) or `dependency_overrides` (routes).
 Never add a test that touches the network. Keep `--selftest` in sync when a request path changes.
 
 ## Not built yet
 
-The working plan lives in `progress.md` (next up: score history on the Progress tab).
-
-The **Practice** tab (`js/views/practice.js`, route `#/practice/<topic>`) is a navigation
-stub — quizzes, translation and spoken drills are planned, not implemented.
+The working plan lives in `progress.md`: read it before starting feature work. The app is
+turning into a learning platform where monologue analysis is one activity among several.
+All activities feed a shared learner model (item bank + `data/attempts.jsonl` + Leitner
+repetition), and a daily «Сегодня» workout is built from it. Budget: ≤ ~8–10 ¢ of Claude
+per exercise; 7–10 new cards a day (`/api/learner/queue`). Stage 1 (learner model backend,
+`/api/learner/*`, `/api/usage`) and Stage 2 (free drills: cards, cloze, the
+«Тренировка» tab) are done; next up is Stage 3 (the «Сегодня» screen + new navigation).
 PyInstaller packaging is deferred (a persistent server doesn't fit a onefile build), but
 `config.base_dir()` still handles a frozen build.

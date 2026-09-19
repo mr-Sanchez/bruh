@@ -128,6 +128,8 @@ class AnalysisResult:
     model: str = config.ANALYSIS_MODEL
     effort: str = config.DEFAULT_ANALYSIS_EFFORT
     request_id: Optional[str] = None
+    # Token counts from response.usage, for the usage/cost log.
+    usage: Dict[str, int] = field(default_factory=dict)
 
 
 def _default_client_factory(api_key: str) -> Any:
@@ -335,6 +337,7 @@ class ClaudeAnalyzer:
             model=self._model,
             effort=self._effort,
             request_id=request_id,
+            usage=_usage_counts(response),
         )
 
     # --------------------------------------------------------------- errors
@@ -405,6 +408,24 @@ def _overall_score(scores: Optional[Scores]) -> Optional[float]:
     # floor(x + 0.5) rather than round(): round() is banker's rounding, which
     # would turn 6.25 into 6.0 but 6.75 into 7.0.
     return math.floor(sum(values) / len(values) * 2 + 0.5) / 2
+
+
+_USAGE_FIELDS: Final[tuple] = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _usage_counts(response: Any) -> Dict[str, int]:
+    """Token counts from response.usage; missing or null fields count as 0."""
+    usage = getattr(response, "usage", None)
+    counts: Dict[str, int] = {}
+    for name in _USAGE_FIELDS:
+        value = getattr(usage, name, None) if usage is not None else None
+        counts[name] = value if isinstance(value, int) else 0
+    return counts
 
 
 def _retry_after(exc: Exception) -> Optional[str]:

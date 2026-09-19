@@ -1,5 +1,5 @@
 // Progress view: topics ranked by a recency-decayed weakness score, each
-// linking to its (stub) Practice screen.
+// linking to its Practice page.
 window.Views = window.Views || {};
 
 Views.progress = (() => {

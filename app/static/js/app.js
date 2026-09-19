@@ -2,7 +2,7 @@
 // #/practice/<topic>. No build step, no framework - just enough to switch
 // between the view modules loaded above.
 (() => {
-  const TAB_FOR_ROUTE = { record: "record", history: "history", session: "history", progress: "progress", practice: "progress" };
+  const TAB_FOR_ROUTE = { record: "record", history: "history", session: "history", progress: "progress", practice: "practice" };
 
   let currentView = null;
 

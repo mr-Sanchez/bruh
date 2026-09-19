@@ -5,9 +5,13 @@ fixed TOPIC_TAXONOMY below. This module aggregates those tags across every
 session into data/progress.json, so the app can answer "what should I
 practice?" without re-reading every analysis.json on every request.
 
+It also keeps the per-skill score history (grammar / vocabulary / fluency /
+naturalness) of every analysed recording, for the score charts.
+
 data/progress.json is a derived cache, not a second source of truth: the
 per-session analysis.json files remain authoritative, and rebuild_from_sessions()
-can always regenerate progress.json from them if it is ever lost or corrupted.
+regenerates progress.json from them after every analysis (and whenever it is
+lost, corrupted or from an older schema).
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app import config
+from app import config, utils
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +78,9 @@ TOPIC_TAXONOMY: Dict[str, Dict[str, str]] = {
 
 TOPIC_KEYS: tuple = tuple(TOPIC_TAXONOMY.keys())
 
-SCHEMA_VERSION = 1
+# v2: score_history added; topic dates are when the speech was recorded, and
+# the whole file is rebuilt from analysis.json files on every analysis.
+SCHEMA_VERSION = 2
 
 # Recency half-life for the weakness score: a topic last seen this many days
 # ago counts for half as much as one seen today, regardless of its raw count.
@@ -82,6 +88,8 @@ _RECENCY_HALF_LIFE_DAYS = 14.0
 # Cap on how many contributing session ids are kept per topic (oldest first
 # out) - this is a "what's driving this" pointer, not a full audit log.
 _MAX_SESSION_IDS_PER_TOPIC = 30
+
+_SKILLS = ("grammar", "vocabulary", "fluency", "naturalness")
 
 _lock = threading.Lock()
 
@@ -91,54 +99,28 @@ def _empty_progress() -> Dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "updated_at": dt.datetime.now().isoformat(),
         "topics": {},
+        "score_history": [],
     }
 
 
 def load_progress() -> Dict[str, Any]:
+    """The aggregate store; rebuilt first if missing, unreadable or from an older schema."""
     path = config.data_dir() / config.PROGRESS_FILENAME
-    if not path.is_file():
-        return _empty_progress()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        logger.warning("Could not read %s; starting from an empty progress store", path)
-        return _empty_progress()
-    data.setdefault("topics", {})
-    return data
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("schema_version") == SCHEMA_VERSION:
+                return data
+        except (OSError, ValueError):
+            logger.warning("Could not read %s; rebuilding it", path)
+    return rebuild_from_sessions()
 
 
 def save_progress(data: Dict[str, Any]) -> Path:
     directory = config.data_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / config.PROGRESS_FILENAME
     data["updated_at"] = dt.datetime.now().isoformat()
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    return path
-
-
-def record_analysis(
-    session_id: str, topic_counts: Dict[str, int], when: Optional[dt.datetime] = None
-) -> Dict[str, Any]:
-    """Fold one session's topic counts into the aggregate store. Thread-safe."""
-    when = when or dt.datetime.now()
-    with _lock:
-        data = load_progress()
-        topics = data["topics"]
-        for topic, count in topic_counts.items():
-            if not count:
-                continue
-            entry = topics.setdefault(
-                topic,
-                {"count": 0, "first_seen": when.isoformat(), "last_seen": when.isoformat(), "session_ids": []},
-            )
-            entry["count"] += count
-            entry["last_seen"] = when.isoformat()
-            entry.setdefault("first_seen", when.isoformat())
-            if session_id not in entry["session_ids"]:
-                entry["session_ids"].append(session_id)
-                entry["session_ids"] = entry["session_ids"][-_MAX_SESSION_IDS_PER_TOPIC:]
-        save_progress(data)
-        return data
+    return utils.write_json(directory / config.PROGRESS_FILENAME, data)
 
 
 def compute_weakness_score(entry: Dict[str, Any], now: Optional[dt.datetime] = None) -> float:
@@ -178,48 +160,50 @@ def top_weak_topics(n: int = 10, now: Optional[dt.datetime] = None) -> List[Dict
 def rebuild_from_sessions(recordings_root: Optional[Path] = None) -> Dict[str, Any]:
     """Recompute progress.json from every recordings/*/analysis.json on disk.
 
-    Safety net if progress.json is ever lost or gets out of sync - the
-    per-session analysis.json files are the real source of truth.
+    This is how progress.json is always produced: the per-session
+    analysis.json files are the real source of truth, and a full rebuild
+    makes a forced re-analysis replace that session's counts and scores
+    instead of adding to them.
     """
-    root = recordings_root or config.recordings_dir()
     data = _empty_progress()
-    if not root.is_dir():
-        with _lock:
-            save_progress(data)
-        return data
-
-    for directory in sorted(root.iterdir()):
-        analysis_path = directory / config.ANALYSIS_FILENAME
-        if not analysis_path.is_file():
-            continue
-        try:
-            analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            logger.warning("Skipping unreadable analysis file: %s", analysis_path)
-            continue
-        topic_counts = analysis.get("topic_counts") or {}
-        created_at = analysis.get("created_at")
-        try:
-            when = dt.datetime.fromisoformat(created_at) if created_at else dt.datetime.now()
-        except ValueError:
-            when = dt.datetime.now()
-        for topic, count in topic_counts.items():
+    for session in utils.iter_analysed_sessions(recordings_root):
+        when = session.recorded_at.isoformat()
+        for topic, count in (session.analysis.get("topic_counts") or {}).items():
             if not count:
                 continue
             entry = data["topics"].setdefault(
-                topic,
-                {"count": 0, "first_seen": when.isoformat(), "last_seen": when.isoformat(), "session_ids": []},
+                topic, {"count": 0, "first_seen": when, "last_seen": when, "session_ids": []}
             )
             entry["count"] += count
-            entry["last_seen"] = max(entry["last_seen"], when.isoformat())
-            entry["first_seen"] = min(entry["first_seen"], when.isoformat())
-            if directory.name not in entry["session_ids"]:
-                entry["session_ids"].append(directory.name)
+            entry["last_seen"] = max(entry["last_seen"], when)
+            entry["first_seen"] = min(entry["first_seen"], when)
+            if session.session_id not in entry["session_ids"]:
+                entry["session_ids"].append(session.session_id)
                 entry["session_ids"] = entry["session_ids"][-_MAX_SESSION_IDS_PER_TOPIC:]
+        history_entry = _score_history_entry(session)
+        if history_entry is not None:
+            data["score_history"].append(history_entry)
 
     with _lock:
         save_progress(data)
     return data
+
+
+def _score_history_entry(session: utils.AnalysedSession) -> Optional[Dict[str, Any]]:
+    """Per-skill scores of one recording; None for v1 analyses, which have none."""
+    scores = session.analysis.get("scores")
+    if not isinstance(scores, dict):
+        return None
+    entry: Dict[str, Any] = {
+        "session_id": session.session_id,
+        "at": session.recorded_at.isoformat(),
+        "language": session.language,
+    }
+    for skill in _SKILLS:
+        value = scores.get(skill)
+        entry[skill] = value.get("score") if isinstance(value, dict) else None
+    entry["overall"] = session.analysis.get("overall_score")
+    return entry
 
 
 if __name__ == "__main__":  # pragma: no cover - operational tool, not a test path
@@ -229,4 +213,7 @@ if __name__ == "__main__":  # pragma: no cover - operational tool, not a test pa
         print("Usage: python -m app.progress_store --rebuild")
         sys.exit(1)
     result = rebuild_from_sessions()
-    print(f"Rebuilt progress.json with {len(result['topics'])} topic(s).")
+    print(
+        f"Rebuilt progress.json with {len(result['topics'])} topic(s) and "
+        f"{len(result['score_history'])} scored session(s)."
+    )
