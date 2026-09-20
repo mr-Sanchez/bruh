@@ -199,9 +199,13 @@ def _score_history_entry(session: utils.AnalysedSession) -> Optional[Dict[str, A
         "at": session.recorded_at.isoformat(),
         "language": session.language,
     }
+    # A typed text has no delivery, so its fluency score is not comparable
+    # with spoken takes and stays out of the history.
+    typed = session.analysis.get("input_mode") == config.INPUT_TEXT
     for skill in _SKILLS:
         value = scores.get(skill)
-        entry[skill] = value.get("score") if isinstance(value, dict) else None
+        skipped = typed and skill == "fluency"
+        entry[skill] = value.get("score") if isinstance(value, dict) and not skipped else None
     entry["overall"] = session.analysis.get("overall_score")
     return entry
 

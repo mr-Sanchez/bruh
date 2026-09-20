@@ -155,6 +155,9 @@ RESPONSE_FILENAME: Final[str] = "deepgram_response.json"
 ANALYSIS_FILENAME: Final[str] = "analysis.json"
 SESSION_META_FILENAME: Final[str] = "session.json"
 PROGRESS_FILENAME: Final[str] = "progress.json"
+# Picture description (Stage 4): the picture a description is about. The
+# browser downscales it before upload; the extension follows its real type.
+IMAGE_FILENAME_STEM: Final[str] = "image"
 # Learner model (see app/learner_store.py). The item bank is a derived cache;
 # attempts and usage are append-only logs and are authoritative.
 ITEM_BANK_FILENAME: Final[str] = "item_bank.json"
@@ -197,6 +200,61 @@ CLOZE_WORDS: Final[dict] = {
 }
 CLOZE_MAX_GAPS: Final[int] = 15
 
+# --- «Сегодня» daily workout (Stage 3) -----------------------------------
+# The workout aims at ~10 minutes: cards, one topic drill, one live activity.
+# Cards past WORKOUT_MAX_CARDS stay in the queue and can be done on «Занятия».
+WORKOUT_MAX_CARDS: Final[int] = 15
+WORKOUT_MINUTES_PER_CARD: Final[float] = 0.4
+WORKOUT_MINUTES_CLOZE: Final[float] = 3.0
+WORKOUT_MINUTES_MONOLOGUE: Final[float] = 3.0
+# How many days of exercise history the «История» tab shows.
+ACTIVITY_HISTORY_DAYS: Final[int] = 60
+
+# Monologue prompts, one per day (picked by date), mostly IT / work life.
+# The question is in English (the practiced language); the hint is UI text.
+SPEAKING_PROMPTS: Final[tuple] = (
+    ("Tell me about a project you worked on recently. What was your part in it?",
+     "Недавний проект и ваша роль в нём"),
+    ("Describe a typical working day from the morning to the evening.",
+     "Типичный рабочий день"),
+    ("What was the hardest bug or problem you solved at work? How did you find it?",
+     "Самая сложная проблема на работе"),
+    ("Explain what your company or team does to someone who is not in IT.",
+     "Чем занимается ваша команда — простыми словами"),
+    ("Tell me about a tool or technology you started using recently. Would you recommend it?",
+     "Новый инструмент или технология"),
+    ("What do you like about remote work, and what do you miss about the office?",
+     "Удалёнка и офис"),
+    ("Describe a meeting that went badly. What would you do differently?",
+     "Неудачная встреча"),
+    ("How do you learn new things? Give an example from the last month.",
+     "Как вы учитесь новому"),
+    ("Tell me about a colleague you enjoy working with and why.",
+     "Коллега, с которым приятно работать"),
+    ("What would you change in your current work process if you could?",
+     "Что бы вы изменили в рабочем процессе"),
+    ("Describe your last vacation or a trip you remember well.",
+     "Последний отпуск или поездка"),
+    ("You are in a job interview. Introduce yourself and your experience.",
+     "Собеседование: расскажите о себе"),
+    ("How do you plan your week? What helps you stay focused?",
+     "Как вы планируете неделю"),
+    ("Tell me about a mistake you made at work and what you learned from it.",
+     "Ошибка на работе и вывод из неё"),
+    ("What is a book, film or series you liked recently? Retell the idea.",
+     "Книга, фильм или сериал"),
+    ("Explain how you would onboard a new person on your team.",
+     "Как ввести новичка в команду"),
+    ("What are your goals for the next year, at work and outside of it?",
+     "Цели на год"),
+    ("Describe a disagreement with a manager or client and how it was resolved.",
+     "Разногласие и как его решили"),
+    ("What does a good code review or a good report look like for you?",
+     "Каким должно быть хорошее ревью / отчёт"),
+    ("Tell me about your hobby and how you got into it.",
+     "Ваше хобби"),
+)
+
 # External references per topic: free online deep links, no API calls. No
 # textbook references - decided 2026-09-19, the learner does not study from books.
 _CAMBRIDGE_GRAMMAR: Final[str] = "https://dictionary.cambridge.org/grammar/british-grammar/"
@@ -215,6 +273,93 @@ TOPIC_RESOURCES: Final[dict] = {
         ("Cambridge Grammar: Relative clauses", _CAMBRIDGE_GRAMMAR + "relative-clauses"),
     ),
 }
+
+# --- Activities & picture description (Stage 4) ---------------------------
+# session.json `kind`: which activity produced the session. Sessions written
+# before Stage 4 have no kind and are monologues.
+KIND_MONOLOGUE: Final[str] = "monologue"
+KIND_PICTURE: Final[str] = "picture"
+# Spoken drills (Stage 6): measured from Deepgram's word timings, never sent
+# to Claude - so they are not analysed and never feed the item bank.
+KIND_TALK: Final[str] = "talk"
+KIND_SHADOWING: Final[str] = "shadowing"
+DRILL_KINDS: Final[tuple] = (KIND_TALK, KIND_SHADOWING)
+SESSION_KINDS: Final[tuple] = (KIND_MONOLOGUE, KIND_PICTURE) + DRILL_KINDS
+# session.json `input_mode`: spoken (Deepgram transcript) or typed by hand.
+# A typed text is stored as transcript.txt verbatim and never goes to Deepgram.
+INPUT_VOICE: Final[str] = "voice"
+INPUT_TEXT: Final[str] = "text"
+TYPED_TEXT_MAX_CHARS: Final[int] = 10_000
+# Image types Claude accepts, by media type -> file extension. The type is
+# sniffed from the bytes, never taken from the browser's claim.
+IMAGE_EXTENSIONS_BY_MEDIA_TYPE: Final[dict] = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+# Claude's per-image API limit is 5 MB; a ~1000 px JPEG from the browser is
+# ~100-300 KB, so hitting this means the downscale did not happen.
+IMAGE_MAX_BYTES: Final[int] = 5 * 1024 * 1024
+# The browser scales the long side down to this before upload: ~1000x750 px
+# is ~1k input tokens (about 0.2 cents), and enough detail to describe.
+IMAGE_MAX_SIDE_PX: Final[int] = 1000
+
+# --- AI exercise sets (Stage 5, ~2-4 cents) --------------------------------
+# One set is 8-10 new exercises on one topic, generated on an explicit click
+# from the learner's own mistakes and rules on it, then kept on disk so it can
+# be redone for free. Gaps and fixes are checked in the browser; translations
+# are graded by Claude in one call at the end of the set (decided 2026-09-19).
+EXERCISE_SET_MODEL: Final[str] = "claude-sonnet-5"
+EXERCISE_SET_EFFORT: Final[str] = "low"
+EXERCISE_SET_MAX_TOKENS: Final[int] = 8_000
+# Grading short translations against a reference is an easy judgement, so the
+# cheapest model does it (Haiku 4.5 takes no effort setting; thinking is off).
+GRADING_MODEL: Final[str] = "claude-haiku-4-5"
+GRADING_MAX_TOKENS: Final[int] = 4_000
+EXERCISE_API_TIMEOUT_SECONDS: Final[int] = 180
+# How many of each exercise a set asks for (easy to hard, in this order).
+SET_GAPS: Final[int] = 3
+SET_FIXES: Final[int] = 2
+SET_TRANSLATIONS: Final[int] = 4
+# The learner's own items on the topic shown to the generator as seeds, and
+# earlier set sentences on the topic it is told not to repeat.
+SET_SEED_ITEMS: Final[int] = 8
+SET_AVOID_SENTENCES: Final[int] = 16
+# Shown next to the button until the usage log has a real average.
+SET_COST_ESTIMATE_USD: Final[float] = 0.03
+WORKOUT_MINUTES_SET: Final[float] = 6.0
+# The set files; like analysis.json they are paid for and cannot be rebuilt.
+PRACTICE_DIRNAME: Final[str] = "practice"
+
+# --- Spoken drills (Stage 6, Deepgram only) --------------------------------
+# «60 секунд»: the same prompt TALK_ROUNDS times in a row, a minute each (the
+# 4-3-2 idea: each retelling gets easier). Only round 1 - the spontaneous
+# take - is logged as an attempt; rounds 2-3 are practice (decided 2026-09-19).
+TALK_SECONDS: Final[int] = 60
+TALK_ROUNDS: Final[int] = 3
+# Both drills log a topic attempt on this topic (decided 2026-09-19).
+FLUENCY_TOPIC: Final[str] = "filler_words_fluency"
+# Deepgram's documented filler tokens (English only, filler_words=true).
+FILLER_TOKENS: Final[frozenset] = frozenset(
+    {"uh", "um", "mhmm", "mm-mm", "uh-uh", "uh-huh", "nuh-uh", "hmm", "mm"}
+)
+# A silence between two words at least this long counts as a hesitation;
+# shorter ones are ordinary breaths and sentence breaks.
+LONG_PAUSE_SECONDS: Final[float] = 2.0
+# Talk score: hesitations (fillers + long pauses) per speaking minute. At or
+# under the first number the score is 1.0, at the second it is 0; linear in
+# between, so the 0.8 pass mark sits at 4 per minute.
+FLUENCY_TARGET_PER_MIN: Final[float] = 2.0
+FLUENCY_ZERO_PER_MIN: Final[float] = 12.0
+# Shadowing reads the improved_version aloud in passages of whole sentences,
+# about this many words each.
+SHADOWING_MIN_WORDS: Final[int] = 20
+SHADOWING_MAX_WORDS: Final[int] = 50
+# A matched word Deepgram heard with less confidence than this is marked as
+# unclear - often a sign of a pronunciation problem.
+UNCLEAR_CONFIDENCE: Final[float] = 0.6
+WORKOUT_MINUTES_SPEECH: Final[float] = 4.0
 
 # --- Pricing (estimates for the usage log, USD) --------------------------
 # Per million tokens: (input, output). Cache writes bill at 1.25x input,
@@ -276,6 +421,11 @@ def logs_dir() -> Path:
 def data_dir() -> Path:
     """Cross-session app data: progress.json and the learner model files."""
     return base_dir() / "data"
+
+
+def practice_dir() -> Path:
+    """AI exercise sets (data/practice/<set id>.json)."""
+    return data_dir() / PRACTICE_DIRNAME
 
 
 def load_environment() -> None:

@@ -15,7 +15,9 @@ from app import config  # noqa: E402
 from app.analyzer import (  # noqa: E402
     AnalysisError,
     ClaudeAnalyzer,
+    ImageInput,
     MissingAnthropicApiKeyError,
+    PictureAnalysis,
     SpeechAnalysis,
 )
 from app.progress_store import TOPIC_TAXONOMY  # noqa: E402
@@ -104,7 +106,9 @@ class ClaudeAnalyzerTests(unittest.TestCase):
             self.assertIn(key, messages.captured["system"])
         self.assertEqual(messages.captured["output_format"], SpeechAnalysis)
         self.assertEqual(messages.captured["thinking"], {"type": "adaptive"})
-        self.assertIn("Yesterday I go", messages.captured["messages"][0]["content"])
+        content = messages.captured["messages"][0]["content"]
+        self.assertEqual([block["type"] for block in content], ["text"])
+        self.assertIn("Yesterday I go", content[0]["text"])
 
     def test_prompt_asks_for_the_coach_style_sections(self) -> None:
         analyzer, messages = make_analyzer()
@@ -139,6 +143,45 @@ class ClaudeAnalyzerTests(unittest.TestCase):
         self.assertEqual(result.strengths, ["Говорит длинными фразами без остановок."])
         # (5 + 6 + 6 + 5) / 4 = 5.5
         self.assertEqual(result.overall_score, 5.5)
+
+    def test_picture_request_sends_the_image_and_asks_for_the_scene(self) -> None:
+        parsed = PictureAnalysis(
+            summary="Описание неполное.",
+            not_mentioned=[{"detail": "Собака на заднем плане", "phrase": "A dog is sleeping."}],
+            scene_vocabulary=[
+                {"phrase": "in the background", "meaning": "на заднем плане", "example": "x"}
+            ],
+        )
+        analyzer, messages = make_analyzer(parsed)
+        image = ImageInput(data=b"\xff\xd8\xffjpeg", media_type="image/jpeg")
+        result = analyzer.analyze("There is a man.", config.default_profile(), 30.0, image=image)
+
+        content = messages.captured["messages"][0]["content"]
+        self.assertEqual([block["type"] for block in content], ["image", "text"])
+        self.assertEqual(content[0]["source"]["media_type"], "image/jpeg")
+        self.assertEqual(content[0]["source"]["data"], "/9j/anBlZw==")
+        self.assertEqual(messages.captured["output_format"], PictureAnalysis)
+        self.assertIn("PICTURE DESCRIPTION", messages.captured["system"])
+        self.assertIn("not_mentioned", messages.captured["system"])
+        self.assertEqual(result.not_mentioned[0].phrase, "A dog is sleeping.")
+        self.assertEqual(result.scene_vocabulary[0].phrase, "in the background")
+
+    def test_typed_text_leaves_fluency_out_of_the_overall_score(self) -> None:
+        parsed = SpeechAnalysis(
+            summary="ok",
+            scores={
+                "grammar": {"score": 6, "comment": ""},
+                "vocabulary": {"score": 7, "comment": ""},
+                "fluency": {"score": 1, "comment": ""},
+                "naturalness": {"score": 8, "comment": ""},
+            },
+        )
+        analyzer, messages = make_analyzer(parsed)
+        result = analyzer.analyze("I writed this.", config.default_profile(), typed=True)
+        self.assertEqual(result.overall_score, 7.0)
+        self.assertIn("TYPED", messages.captured["system"])
+        self.assertNotIn("PICTURE DESCRIPTION", messages.captured["system"])
+        self.assertIn("Typed text", messages.captured["messages"][0]["content"][-1]["text"])
 
     def test_out_of_range_scores_are_clamped(self) -> None:
         parsed = SpeechAnalysis(

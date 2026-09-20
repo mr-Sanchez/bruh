@@ -29,6 +29,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from app import config
+from app.progress_store import TOPIC_TAXONOMY
 from app.utils import AnalysedSession
 
 KIND_FIX = "fix"  # one concrete mistake: quote -> correction
@@ -110,7 +111,8 @@ def items_from_analysis(session: AnalysedSession) -> List[Dict[str, Any]]:
             },
         )
 
-    for source in ("vocabulary", "takeaways"):
+    # scene_vocabulary: words for a described picture (picture descriptions only).
+    for source in ("vocabulary", "takeaways", "scene_vocabulary"):
         for phrase in _dicts(analysis.get(source)):
             add(
                 KIND_PHRASE,
@@ -126,26 +128,44 @@ def items_from_analysis(session: AnalysedSession) -> List[Dict[str, Any]]:
     return items
 
 
-def build_bank(sessions: Iterable[AnalysedSession]) -> Dict[str, Dict[str, Any]]:
+def build_bank(
+    sessions: Iterable[AnalysedSession], set_items: Iterable[Dict[str, Any]] = ()
+) -> Dict[str, Dict[str, Any]]:
     """Merge every recording's items by id; the latest recording's wording wins.
 
     Sessions must come oldest first (utils.iter_analysed_sessions does that).
+    `set_items` are mistakes made in AI exercise sets (items_from_set_run):
+    they add cards and occurrences, but never reword an item that came from
+    speech - the learner's own sentence is the better card.
     """
     bank: Dict[str, Dict[str, Any]] = {}
     for session in sessions:
         for item in items_from_analysis(session):
-            existing = bank.get(item["id"])
-            if existing is None:
-                bank[item["id"]] = item
-                continue
-            occurrences = existing["occurrences"]
-            sources = sorted(set(existing.get("sources", [])) | set(item.get("sources", [])))
-            existing.update({k: v for k, v in item.items() if k not in ("occurrences", "language")})
-            if sources:
-                existing["sources"] = sources
-            if item["occurrences"][0]["session_id"] not in {o["session_id"] for o in occurrences}:
-                occurrences.append(item["occurrences"][0])
+            _merge_item(bank, item, reword=True)
+    for item in sorted(set_items, key=lambda i: i["occurrences"][0]["at"]):
+        _merge_item(bank, item, reword=False)
     return bank
+
+
+def _occurrence_key(occurrence: Dict[str, Any]) -> Any:
+    return occurrence.get("session_id") or occurrence.get("set_run")
+
+
+def _merge_item(bank: Dict[str, Dict[str, Any]], item: Dict[str, Any], *, reword: bool) -> None:
+    existing = bank.get(item["id"])
+    if existing is None:
+        bank[item["id"]] = item
+        return
+    occurrences = existing["occurrences"]
+    if reword:
+        sources = sorted(set(existing.get("sources", [])) | set(item.get("sources", [])))
+        existing.update({k: v for k, v in item.items() if k not in ("occurrences", "language")})
+        if sources:
+            existing["sources"] = sources
+    new = item["occurrences"][0]
+    if _occurrence_key(new) not in {_occurrence_key(o) for o in occurrences}:
+        occurrences.append(new)
+        occurrences.sort(key=lambda o: o["at"])
 
 
 def _dicts(value: Any) -> List[Dict[str, Any]]:
@@ -512,3 +532,187 @@ def cloze_segments(text: str, topic: str) -> List[Dict[str, Any]]:
     if position < len(text or ""):
         segments.append({"text": text[position:]})
     return segments
+
+
+# ------------------------------------------------------------ exercise sets
+SET_EXERCISE = "ai_set"  # attempts-log `exercise` of a finished set
+# Topics a set can train: not delivery (spoken drills do that), and not the
+# "other" catch-all, which is no single thing to write exercises about.
+SET_EXCLUDED_TOPICS: frozenset = NON_RECALL_TOPICS | {"other"}
+
+
+def set_topic_allowed(topic: str) -> bool:
+    return topic in TOPIC_TAXONOMY and topic not in SET_EXCLUDED_TOPICS
+
+
+_NON_WORD = re.compile(r"[^\w'\s]", flags=re.UNICODE)
+
+
+def normalize_answer(text: str) -> str:
+    """Case, quotes, punctuation and spacing do not count; apostrophes do.
+
+    The server-side twin of Drill.normalize in drill.js.
+    """
+    value = (text or "").translate(_QUOTE_CHARS).lower().replace("_", " ")
+    return _WHITESPACE.sub(" ", _NON_WORD.sub(" ", value)).strip()
+
+
+def answer_matches(answer: str, accepted: Iterable[str]) -> bool:
+    value = normalize_answer(answer)
+    return bool(value) and any(normalize_answer(candidate) == value for candidate in accepted)
+
+
+def set_run_score(results: Sequence[Dict[str, Any]]) -> float:
+    """Share of right answers in one run of a set (0..1)."""
+    if not results:
+        return 0.0
+    return sum(1 for r in results if r.get("correct")) / len(results)
+
+
+def items_from_set_run(
+    exercise_set: Dict[str, Any], run: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Every wrong answer of a set run as a fix card (decided 2026-09-19).
+
+    The card is the learner's own wrong sentence -> the right one, the same
+    shape as a mistake from speech, so it goes through the same Leitner
+    boxes and the same daily allowance of new cards:
+
+      gap        the sentence with the learner's filler -> with the right one;
+      fix        the set's faulty sentence -> its correction;
+      translate  the learner's translation -> Claude's minimal correction of
+                 it, with the reference as a "more natural" version.
+
+    Skipped (left blank) translations make no card: there is no sentence of
+    the learner's to correct.
+    """
+    exercises = {e["id"]: e for e in _dicts(exercise_set.get("exercises"))}
+    occurrence = {
+        "set_id": exercise_set.get("id"),
+        "set_run": f"{exercise_set.get('id')}@{run.get('at')}",
+        "at": run.get("at"),
+    }
+    items: List[Dict[str, Any]] = []
+    for result in _dicts(run.get("results")):
+        exercise = exercises.get(result.get("exercise_id"))
+        if exercise is None or result.get("correct"):
+            continue
+        answer = (result.get("answer") or "").strip()
+        accept = [a for a in exercise.get("accept") or [] if a]
+        explanation = exercise.get("explanation") or ""
+        better: List[str] = []
+        if exercise.get("type") == "gap" and accept:
+            before, after = exercise.get("before", ""), exercise.get("after", "")
+            quote = f"{before}{answer or '___'}{after}"
+            correction = f"{before}{accept[0]}{after}"
+        elif exercise.get("type") == "fix" and accept:
+            quote, correction, better = exercise.get("sentence", ""), accept[0], accept[1:]
+        elif exercise.get("type") == "translate" and answer:
+            reference = exercise.get("reference") or ""
+            corrected = (result.get("corrected") or "").strip()
+            use_fix = corrected and normalize_answer(corrected) != normalize_answer(answer)
+            quote, correction = answer, corrected if use_fix else reference
+            if normalize_answer(reference) != normalize_answer(correction):
+                better = [reference]
+            explanation = result.get("comment") or ""
+        else:
+            continue
+        if not normalize_text(correction) or normalize_answer(quote) == normalize_answer(correction):
+            continue
+        items.append(
+            {
+                "id": item_id(KIND_FIX, correction),
+                "kind": KIND_FIX,
+                "language": exercise_set.get("language", "en"),
+                "topic": exercise_set.get("topic"),
+                "severity": "moderate",
+                "pattern_id": None,
+                "origin": SET_EXERCISE,
+                "content": {
+                    "quote": quote,
+                    "correction": correction,
+                    "better_versions": better,
+                    "explanation": explanation,
+                },
+                "occurrences": [dict(occurrence)],
+            }
+        )
+    return items
+
+
+# ------------------------------------------------------------ daily workout
+def speaking_prompt_index(today: dt.date) -> int:
+    """Today's monologue prompt: a different one each day, cycling the list."""
+    return today.toordinal() % len(config.SPEAKING_PROMPTS)
+
+
+def activity_streak(active_days: Iterable[dt.date], today: dt.date) -> int:
+    """Consecutive active days up to today.
+
+    A day not yet active does not break the streak until it is over:
+    in the morning the streak still counts up to yesterday.
+    """
+    days = set(active_days)
+    day = today if today in days else today - dt.timedelta(days=1)
+    streak = 0
+    while day in days:
+        streak += 1
+        day -= dt.timedelta(days=1)
+    return streak
+
+
+def pick_cloze_text(texts: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The text a topic's cloze drill should use next.
+
+    Never-practised texts first (newest recording first - `texts` come in
+    that order), then the one with the lowest best score. Texts without gaps
+    are skipped.
+    """
+    candidates = [t for t in texts if t.get("gaps")]
+    fresh = [t for t in candidates if not t.get("attempts")]
+    if fresh:
+        return fresh[0]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda t: (t.get("best_score") or 0.0, t.get("attempts", 0)))
+
+
+def cloze_topic_order(mastery: Sequence[Dict[str, Any]]) -> List[str]:
+    """Cloze topics, the one that needs training most first.
+
+    `mastery` is topic_mastery() output (already sorted by priority); cloze
+    topics the learner has no data on yet come last, in config order.
+    """
+    ranked = [row["key"] for row in mastery if row["key"] in config.CLOZE_WORDS]
+    return ranked + [topic for topic in config.CLOZE_WORDS if topic not in ranked]
+
+
+def attempts_on(attempts: Sequence[Dict[str, Any]], day: dt.date) -> List[Dict[str, Any]]:
+    return [a for a in attempts if _parse(a["ts"]).date() == day]
+
+
+def daily_activity(attempts: Sequence[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
+    """Exercise history per day, newest first, for the «История» tab.
+
+    Cards are summed up (how many, how many right); topic drills are listed
+    one by one with their score, since each is a whole text.
+    """
+    by_day: Dict[str, Dict[str, Any]] = {}
+    for attempt in attempts:
+        day = _parse(attempt["ts"]).date().isoformat()
+        entry = by_day.setdefault(day, {"date": day, "cards": 0, "cards_correct": 0, "drills": []})
+        if isinstance(attempt.get("item_id"), str):
+            entry["cards"] += 1
+            entry["cards_correct"] += 1 if attempt.get("correct") else 0
+        else:
+            entry["drills"].append(
+                {
+                    "topic": attempt.get("topic"),
+                    "exercise": attempt.get("exercise"),
+                    "score": round(attempt_score(attempt), 3),
+                    "session_id": attempt.get("session_id"),
+                    "set_id": attempt.get("set_id"),
+                    "at": attempt["ts"],
+                }
+            )
+    return sorted(by_day.values(), key=lambda entry: entry["date"], reverse=True)[:days]

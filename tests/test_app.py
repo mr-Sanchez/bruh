@@ -292,6 +292,31 @@ class FileLayoutTests(unittest.TestCase):
             self.assertEqual(loaded.status, utils.STATUS_DONE)
             self.assertAlmostEqual(loaded.duration_seconds, 12.5)
             self.assertEqual(loaded.started_at, session.started_at)
+            # Sessions from before Stage 4 have no kind: they are voice monologues.
+            self.assertEqual(loaded.kind, config.KIND_MONOLOGUE)
+            self.assertEqual(loaded.input_mode, config.INPUT_VOICE)
+            self.assertIsNone(loaded.image_path)
+
+    def test_picture_session_meta_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = utils.create_session(Path(tmp), dt.datetime(2026, 9, 19, 9, 0, 0))
+            session.kind = config.KIND_PICTURE
+            session.input_mode = config.INPUT_TEXT
+            session.image_filename = "image.jpg"
+            utils.write_session_meta(session)
+
+            loaded = utils.read_session_meta(session.directory)
+            self.assertEqual(loaded.kind, config.KIND_PICTURE)
+            self.assertEqual(loaded.input_mode, config.INPUT_TEXT)
+            self.assertEqual(loaded.image_path, session.directory / "image.jpg")
+
+    def test_image_type_is_sniffed_from_the_bytes(self) -> None:
+        self.assertEqual(utils.sniff_image_type(b"\xff\xd8\xff\xe0..."), "image/jpeg")
+        self.assertEqual(utils.sniff_image_type(b"\x89PNG\r\n\x1a\n..."), "image/png")
+        self.assertEqual(utils.sniff_image_type(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp")
+        self.assertEqual(utils.sniff_image_type(b"GIF89a..."), "image/gif")
+        self.assertIsNone(utils.sniff_image_type(b"<svg xmlns=...>"))
+        self.assertIsNone(utils.sniff_image_type(b""))
 
     def test_list_sessions_skips_directories_without_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

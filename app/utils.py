@@ -53,10 +53,21 @@ class Session:
     language_key: str = config.DEFAULT_LANGUAGE_KEY
     status: str = STATUS_RECORDING
     error_message: Optional[str] = None
+    kind: str = config.KIND_MONOLOGUE
+    input_mode: str = config.INPUT_VOICE
+    # Set for picture descriptions only: "image" + the sniffed extension.
+    image_filename: Optional[str] = None
+    # Spoken drills only: what was practised (talk: prompt, series, round;
+    # shadowing: the source recording, passage and its reference text).
+    drill: Optional[Dict[str, Any]] = None
 
     @property
     def audio_path(self) -> Path:
         return self.directory / self.audio_filename
+
+    @property
+    def image_path(self) -> Optional[Path]:
+        return self.directory / self.image_filename if self.image_filename else None
 
     @property
     def transcript_path(self) -> Path:
@@ -69,6 +80,10 @@ class Session:
     @property
     def analysis_path(self) -> Path:
         return self.directory / config.ANALYSIS_FILENAME
+
+    @property
+    def is_drill(self) -> bool:
+        return self.kind in config.DRILL_KINDS
 
     @property
     def session_meta_path(self) -> Path:
@@ -111,6 +126,10 @@ def write_session_meta(session: Session) -> Path:
         "language_key": session.language_key,
         "status": session.status,
         "error_message": session.error_message,
+        "kind": session.kind,
+        "input_mode": session.input_mode,
+        "image_filename": session.image_filename,
+        "drill": session.drill,
     }
     return write_json(session.session_meta_path, payload)
 
@@ -135,6 +154,10 @@ def read_session_meta(directory: Path) -> Optional[Session]:
         language_key=payload.get("language_key", config.DEFAULT_LANGUAGE_KEY),
         status=payload.get("status", STATUS_DONE),
         error_message=payload.get("error_message"),
+        kind=payload.get("kind") or config.KIND_MONOLOGUE,
+        input_mode=payload.get("input_mode") or config.INPUT_VOICE,
+        image_filename=payload.get("image_filename") or None,
+        drill=payload.get("drill") if isinstance(payload.get("drill"), dict) else None,
     )
     if session.transcript_path.is_file():
         session.transcript = read_transcript_body(session.transcript_path)
@@ -164,14 +187,15 @@ def write_transcript(
 ) -> Path:
     """Write transcript.txt: a short header, a '---' separator, then the words.
 
-    The transcript body is written exactly as Deepgram returned it — no
-    clean-up, no re-wrapping, no post-processing.
+    The transcript body is written exactly as Deepgram returned it (or as the
+    learner typed it) — no clean-up, no re-wrapping, no post-processing.
     """
     profile = profile or config.default_profile()
+    typed = session.input_mode == config.INPUT_TEXT
     header = (
         f"Recording: {session.started_at_text}\n"
         f"Duration: {format_duration(session.duration_seconds)}\n"
-        f"Model: {profile.model_display}\n"
+        f"Model: {'typed by hand, no speech recognition' if typed else profile.model_display}\n"
         f"Language: {profile.language}\n"
         f"\n---\n\n"
     )
@@ -295,6 +319,28 @@ def read_transcript_body(path: Path) -> str:
     if index == -1:
         return text.strip()
     return text[index + len(marker) :].strip()
+
+
+_IMAGE_SIGNATURES: tuple = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def sniff_image_type(data: bytes) -> Optional[str]:
+    """The media type of an image from its first bytes, or None if not a supported image.
+
+    The browser's claimed content type is not trusted: the type is sent on to
+    Claude, which rejects a request whose declared type does not match.
+    """
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    for signature, media_type in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return media_type
+    return None
 
 
 def wav_duration_seconds(path: Path) -> float:

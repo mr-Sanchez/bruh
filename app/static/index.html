@@ -10,8 +10,8 @@
   <header class="topbar">
     <div class="brand">🎙️ Voice Practice Coach</div>
     <nav class="tabs">
-      <a href="#/record" data-route="record">Запись</a>
-      <a href="#/practice" data-route="practice">Тренировка</a>
+      <a href="#/today" data-route="today">Сегодня</a>
+      <a href="#/practice" data-route="practice">Занятия</a>
       <a href="#/history" data-route="history">История</a>
       <a href="#/progress" data-route="progress">Прогресс</a>
     </nav>
@@ -20,8 +20,12 @@
   <main id="app" class="app"></main>
 
   <script src="/js/api.js"></script>
+  <script src="/js/recorder.js"></script>
+  <script src="/js/charts.js"></script>
   <script src="/js/drill.js"></script>
+  <script src="/js/views/today.js"></script>
   <script src="/js/views/record.js"></script>
+  <script src="/js/views/speech.js"></script>
   <script src="/js/views/history.js"></script>
   <script src="/js/views/session.js"></script>
   <script src="/js/views/progress.js"></script>

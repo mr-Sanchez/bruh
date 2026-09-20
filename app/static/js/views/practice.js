@@ -1,5 +1,5 @@
-// Practice view: the free ($0) drills.
-//   #/practice          - hub: today's cards, cloze texts, topics to train
+// «Занятия»: every activity, plus the free ($0) drills.
+//   #/practice          - hub: activities, today's cards, cloze texts, topics
 //   #/practice/<topic>  - one topic: its cards, its cloze drill, reference links
 // Cards come from the learner model (daily queue / due items of a topic);
 // drills themselves run in js/drill.js.
@@ -25,10 +25,11 @@ Views.practice = (() => {
 
   // ---------------------------------------------------------------- hub
   async function renderHub(container) {
-    const [queue, mastery, topicsData] = await Promise.all([
+    const [queue, mastery, topicsData, usage] = await Promise.all([
       Api.getQueue(),
       Api.getLearnerTopics(),
       Api.getTopics(),
+      Api.getUsage().catch(() => null),
     ]);
     const clozeTopics = topicsData.topics.filter((t) => t.has_cloze).map((t) => t.key);
     const clozeTexts = {};
@@ -40,6 +41,7 @@ Views.practice = (() => {
 
     const cards = queue.reviews.concat(queue.new);
     container.innerHTML = `
+      ${renderActivities(usage)}
       <div class="card">
         <h2>Карточки на сегодня</h2>
         ${renderQueueSummary(queue, cards.length)}
@@ -49,7 +51,7 @@ Views.practice = (() => {
         ${renderClozeTable(clozeTopics, clozeTexts)}
       </div>
       <div class="card">
-        <h2>Темы</h2>
+        <h2>Тренажёры по темам</h2>
         ${renderTopicList(mastery.topics)}
       </div>`;
 
@@ -64,6 +66,43 @@ Views.practice = (() => {
       );
     }
     wireCloze(container, clozeTexts, () => rerender());
+  }
+
+  // Live activities. Each price is the real average from the usage log, so
+  // the cost of a click is visible before it is made.
+  function renderActivities(usage) {
+    const price = (purpose) => {
+      const entry = usage && usage.by_purpose[`anthropic:${purpose}`];
+      return entry && entry.avg_cost_usd
+        ? ` · анализ ≈ ${Math.round(entry.avg_cost_usd * 100 * 10) / 10} ¢`
+        : "";
+    };
+    return `
+      <div class="card">
+        <h2>Занятия</h2>
+        <div class="activity-grid">
+          <a class="activity" href="#/record">
+            <span class="activity-icon" aria-hidden="true">🎙️</span>
+            <span><strong>Монолог</strong><br/>
+              <span class="topic-meta">Свободная речь, запись и разбор${escapeHtml(price("analysis"))}</span></span>
+          </a>
+          <a class="activity" href="#/picture">
+            <span class="activity-icon" aria-hidden="true">🖼️</span>
+            <span><strong>Описание картинки</strong><br/>
+              <span class="topic-meta">Голосом или текстом; что упущено и слова для сцены${escapeHtml(price("picture_analysis"))}</span></span>
+          </a>
+          <a class="activity" href="#/talk">
+            <span class="activity-icon" aria-hidden="true">⏱️</span>
+            <span><strong>60 секунд</strong><br/>
+              <span class="topic-meta">Минута на тему, три раза подряд: темп, паразиты, паузы · без Claude</span></span>
+          </a>
+          <a class="activity" href="#/shadowing">
+            <span class="activity-icon" aria-hidden="true">🗣️</span>
+            <span><strong>Shadowing</strong><br/>
+              <span class="topic-meta">Прочитать вслух свою «улучшенную версию» и увидеть, что не прозвучало · без Claude</span></span>
+          </a>
+        </div>
+      </div>`;
   }
 
   function renderQueueSummary(queue, total) {
@@ -171,11 +210,13 @@ Views.practice = (() => {
       has_cloze: false,
     };
     const texts = topic.has_cloze ? (await Api.getPracticeTexts(topicKey)).texts : [];
+    // Topics a set cannot train (fillers, "other") answer 400: no set card.
+    const sets = await Api.listSets(topicKey).catch(() => null);
     const due = itemsData.items;
     const closed = allItems.items.filter((i) => i.state.closed).length;
 
     container.innerHTML = `
-      <p><a href="#/practice">← Все упражнения</a></p>
+      <p><a href="#/practice">← Занятия</a></p>
       <div class="card">
         <h2>${escapeHtml(topic.label)}</h2>
         <p class="muted">${escapeHtml(topic.description)}</p>
@@ -196,6 +237,7 @@ Views.practice = (() => {
             : `<p class="muted">${allItems.count ? "Сейчас повторять нечего — карточки вернутся по графику." : "По этой теме карточек пока нет."}</p>`
         }
       </div>
+      ${sets ? `<div class="card" data-role="sets">${renderSets(sets)}</div>` : ""}
       ${
         topic.has_cloze
           ? `<div class="card">
@@ -204,6 +246,7 @@ Views.practice = (() => {
              </div>`
           : ""
       }`;
+    if (sets) wireSets(container, topicKey);
 
     const start = container.querySelector('[data-role="start-topic"]');
     if (start) {
@@ -216,6 +259,82 @@ Views.practice = (() => {
       );
     }
     wireCloze(container, { [topicKey]: texts }, () => rerender(topicKey));
+  }
+
+  // ------------------------------------------------------ AI exercise sets
+  // A set costs money, so the price is on the button and a generated but
+  // unstarted set is always offered first (it is already paid for).
+  function renderSets(data) {
+    const waiting = data.sets.find((s) => !s.runs);
+    const done = data.sets.filter((s) => s.runs).slice(0, 5);
+    const canGenerate = data.anthropic_configured;
+    const newButton = canGenerate
+      ? `<button class="${waiting ? "secondary" : ""}" data-set-new>Новый набор · ≈ ${formatCents(data.cost_estimate_usd)}</button>`
+      : "";
+    return `
+      <h2>AI-набор упражнений</h2>
+      <p class="muted">8–10 новых предложений на ваших ошибках и правилах этой темы, в рабочем контексте:
+        вставить пропущенное, исправить ошибку, перевести с русского. Переводы проверяет Claude.
+        Ошибки становятся карточками.</p>
+      ${canGenerate ? "" : `<p class="muted">Чтобы составлять наборы, нужен ANTHROPIC_API_KEY.</p>`}
+      <div class="button-row">
+        ${waiting ? `<button data-set-start="${escapeHtml(waiting.id)}">Начать набор (уже составлен)</button>` : ""}
+        ${newButton}
+      </div>
+      <p class="muted" data-role="set-status"></p>
+      ${
+        done.length
+          ? `<ul class="topic-list">${done
+              .map(
+                (s) => `
+            <li class="topic-row">
+              <div>
+                <strong>${escapeHtml((s.created_at || "").slice(0, 16).replace("T", " "))}</strong><br/>
+                <span class="topic-meta">последний раз: ${Math.round(s.last_score * 100)}% · лучший: ${Math.round(
+                  s.best_score * 100
+                )}% · пройден ${s.runs} раз(а)</span>
+              </div>
+              <button class="secondary" data-set-start="${escapeHtml(s.id)}">Пройти ещё раз</button>
+            </li>`
+              )
+              .join("")}</ul>
+             <p class="muted">Повтор набора бесплатный; платной бывает только проверка новых вариантов перевода (доли цента).</p>`
+          : ""
+      }`;
+  }
+
+  function wireSets(container, topicKey) {
+    const card = container.querySelector('[data-role="sets"]');
+    const status = card.querySelector('[data-role="set-status"]');
+    const run = (exerciseSet) => {
+      if (root !== container) return; // navigated away while it was loading
+      Drill.runSet(container, exerciseSet, { context: "topic", onFinish: () => rerender(topicKey) });
+    };
+
+    card.querySelectorAll("[data-set-start]").forEach((button) =>
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          run((await Api.getSet(button.dataset.setStart)).set);
+        } catch (err) {
+          status.textContent = `Не удалось открыть набор: ${err.message}`;
+          button.disabled = false;
+        }
+      })
+    );
+    const create = card.querySelector("[data-set-new]");
+    if (create) {
+      create.addEventListener("click", async () => {
+        card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+        status.textContent = "Claude составляет набор — обычно 10–30 секунд…";
+        try {
+          run((await Api.createSet(topicKey, true)).set);
+        } catch (err) {
+          status.textContent = `Не удалось составить набор: ${err.message}`;
+          card.querySelectorAll("button").forEach((b) => (b.disabled = false));
+        }
+      });
+    }
   }
 
   function dispose() {

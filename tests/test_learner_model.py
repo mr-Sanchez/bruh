@@ -390,5 +390,137 @@ class ClozeTests(unittest.TestCase):
         self.assertEqual(learner_model.cloze_segments("The end.", "verb_tense"), [{"text": "The end."}])
 
 
+class WorkoutTests(unittest.TestCase):
+    def test_streak_counts_up_to_yesterday_until_today_is_active(self) -> None:
+        today = dt.date(2026, 9, 10)
+        active = {dt.date(2026, 9, 8), dt.date(2026, 9, 9)}
+        self.assertEqual(learner_model.activity_streak(active, today), 2)
+        self.assertEqual(learner_model.activity_streak(active | {today}, today), 3)
+        self.assertEqual(learner_model.activity_streak({dt.date(2026, 9, 8)}, today), 0)
+        self.assertEqual(learner_model.activity_streak(set(), today), 0)
+
+    def test_cloze_text_prefers_unpractised_then_lowest_score(self) -> None:
+        texts = [
+            {"session_id": "new", "gaps": 4, "attempts": 1, "best_score": 0.9},
+            {"session_id": "fresh", "gaps": 3, "attempts": 0, "best_score": None},
+            {"session_id": "empty", "gaps": 0, "attempts": 0, "best_score": None},
+            {"session_id": "weak", "gaps": 5, "attempts": 2, "best_score": 0.4},
+        ]
+        self.assertEqual(learner_model.pick_cloze_text(texts)["session_id"], "fresh")
+        self.assertEqual(learner_model.pick_cloze_text(texts[:1] + texts[3:])["session_id"], "weak")
+        self.assertIsNone(learner_model.pick_cloze_text(texts[2:3]))
+
+    def test_cloze_topics_follow_mastery_priority(self) -> None:
+        mastery = [{"key": "verb_tense"}, {"key": "prepositions"}]
+        self.assertEqual(
+            learner_model.cloze_topic_order(mastery), ["prepositions", "articles"]
+        )
+
+    def test_prompt_changes_daily_and_stays_in_range(self) -> None:
+        first = learner_model.speaking_prompt_index(dt.date(2026, 9, 1))
+        second = learner_model.speaking_prompt_index(dt.date(2026, 9, 2))
+        self.assertNotEqual(first, second)
+        self.assertTrue(0 <= first < len(config.SPEAKING_PROMPTS))
+
+    def test_daily_activity_sums_cards_and_lists_drills(self) -> None:
+        attempts = [
+            {"ts": day(1, 9).isoformat(), "item_id": "a", "correct": True},
+            {"ts": day(1, 10).isoformat(), "item_id": "b", "correct": False},
+            {"ts": day(1, 11).isoformat(), "topic": "articles", "exercise": "cloze",
+             "score": 0.75, "correct": False},
+            {"ts": day(3).isoformat(), "item_id": "a", "correct": True},
+        ]
+        history = learner_model.daily_activity(attempts, days=10)
+        self.assertEqual([d["date"] for d in history], ["2026-09-03", "2026-09-01"])
+        self.assertEqual((history[1]["cards"], history[1]["cards_correct"]), (2, 1))
+        self.assertEqual(history[1]["drills"][0]["score"], 0.75)
+        self.assertEqual(len(learner_model.daily_activity(attempts, days=1)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+def exercise_set(results: List[Dict[str, Any]]) -> tuple:
+    data = {
+        "id": "set-20260901-120000",
+        "topic": "verb_tense",
+        "language": "en",
+        "exercises": [
+            {"id": "ex1", "type": "gap", "before": "Yesterday we ", "after": " it.",
+             "accept": ["shipped"], "explanation": "Past Simple."},
+            {"id": "ex2", "type": "fix", "sentence": "I go there yesterday.",
+             "accept": ["I went there yesterday.", "I went over there yesterday."],
+             "explanation": "Past Simple."},
+            {"id": "ex3", "type": "translate", "russian": "Я уже починил баг.",
+             "reference": "I have already fixed the bug.", "focus": "Present Perfect"},
+            {"id": "ex4", "type": "translate", "russian": "Мы созвонились.",
+             "reference": "We had a call.", "focus": "Past Simple"},
+        ],
+    }
+    run = {"at": day(2).isoformat(), "results": results}
+    return data, run
+
+
+class ExerciseSetTests(unittest.TestCase):
+    def test_answers_are_compared_without_case_or_punctuation(self) -> None:
+        self.assertEqual(
+            learner_model.normalize_answer("  It’s DONE, isn't it?! "), "it's done isn't it"
+        )
+        self.assertTrue(
+            learner_model.answer_matches("i went there yesterday", ["I went there yesterday."])
+        )
+        self.assertFalse(learner_model.answer_matches("", [""]))
+        self.assertAlmostEqual(
+            learner_model.set_run_score([{"correct": True}, {"correct": False}]), 0.5
+        )
+
+    def test_only_topics_a_set_can_train_are_allowed(self) -> None:
+        self.assertTrue(learner_model.set_topic_allowed("articles"))
+        for topic in ("filler_words_fluency", "repetition_self_correction", "other", "nope"):
+            self.assertFalse(learner_model.set_topic_allowed(topic))
+
+    def test_wrong_answers_become_fix_cards_of_the_learners_own_sentences(self) -> None:
+        data, run = exercise_set([
+            {"exercise_id": "ex1", "answer": "ship", "correct": False},
+            {"exercise_id": "ex2", "answer": "I go there yesterday.", "correct": False},
+            {"exercise_id": "ex3", "answer": "I already fixed the bug.", "correct": False,
+             "comment": "Нужно Present Perfect.", "corrected": "I have already fixed the bug."},
+            {"exercise_id": "ex4", "answer": "", "correct": False, "corrected": "We had a call."},
+        ])
+        items = learner_model.items_from_set_run(data, run)
+
+        self.assertEqual(len(items), 3)  # the blank translation makes no card
+        gap, fix, translation = items
+        self.assertEqual(gap["content"]["quote"], "Yesterday we ship it.")
+        self.assertEqual(gap["content"]["correction"], "Yesterday we shipped it.")
+        self.assertEqual(fix["content"]["better_versions"], ["I went over there yesterday."])
+        self.assertEqual(translation["content"]["quote"], "I already fixed the bug.")
+        self.assertEqual(translation["content"]["correction"], "I have already fixed the bug.")
+        self.assertEqual(translation["content"]["better_versions"], [])  # same as the reference
+        self.assertEqual(translation["content"]["explanation"], "Нужно Present Perfect.")
+        for item in items:
+            self.assertEqual(
+                (item["kind"], item["topic"], item["origin"]), (KIND_FIX, "verb_tense", "ai_set")
+            )
+            self.assertEqual(item["occurrences"][0]["set_id"], "set-20260901-120000")
+
+    def test_right_answers_make_no_cards(self) -> None:
+        data, run = exercise_set([{"exercise_id": "ex1", "answer": "shipped", "correct": True}])
+        self.assertEqual(learner_model.items_from_set_run(data, run), [])
+
+    def test_set_mistake_merges_into_a_speech_item_without_rewording_it(self) -> None:
+        spoken = session("s1", DAY1, {"issues": [
+            issue("I went there yesterday.", quote="I go there yesterday", topic="verb_tense")
+        ]})
+        data, run = exercise_set([
+            {"exercise_id": "ex2", "answer": "I go there yesterday.", "correct": False}
+        ])
+        bank = learner_model.build_bank([spoken], learner_model.items_from_set_run(data, run))
+
+        self.assertEqual(len(bank), 1)
+        item = next(iter(bank.values()))
+        self.assertNotIn("origin", item)
+        self.assertEqual(item["content"]["quote"], "I go there yesterday")
+        self.assertEqual([o.get("session_id") or o.get("set_id") for o in item["occurrences"]],
+                         ["s1", "set-20260901-120000"])

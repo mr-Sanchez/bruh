@@ -1,8 +1,15 @@
 """FastAPI routes for the local web app: sessions, analysis, progress, topics.
 
+A session is one activity's take: a monologue, or a picture description
+(the picture is stored next to the audio). Either can be spoken (Deepgram
+transcript) or, for a picture, typed - a typed text becomes transcript.txt
+verbatim and never goes to Deepgram. Spoken drills («60 секунд», shadowing)
+are sessions too, but are measured from Deepgram's word timings instead of
+being analysed by Claude.
+
 Kept deliberately thin: this module wires HTTP to the existing per-session
-flat-file model (app.utils) plus the two API integrations (app.transcriber,
-app.analyzer). Transcriber/analyzer construction goes through small factory
+flat-file model (app.utils) plus the API integrations (app.transcriber,
+app.analyzer, app.exercise_sets). Their construction goes through small factory
 dependencies so tests can substitute fakes via app.dependency_overrides,
 mirroring the client_factory pattern already used inside those modules.
 """
@@ -12,20 +19,31 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import mimetypes
+import re
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from app import config, learner_store, progress_store, utils
+from app import (
+    config,
+    exercise_sets,
+    learner_model,
+    learner_store,
+    progress_store,
+    speech_drills,
+    utils,
+)
 from app.analyzer import (
     ANALYSIS_SCHEMA_VERSION,
     AnalysisError,
     ClaudeAnalyzer,
+    ImageInput,
     MissingAnthropicApiKeyError,
 )
+from app.exercise_sets import ExerciseSetGenerator, TranslationAnswer
 from app.transcriber import DeepgramTranscriber, TranscriptionError
 from app.utils import Session
 
@@ -35,6 +53,7 @@ router = APIRouter(prefix="/api")
 
 TranscriberFactory = Callable[[config.LanguageProfile], DeepgramTranscriber]
 AnalyzerFactory = Callable[[], ClaudeAnalyzer]
+GeneratorFactory = Callable[[], ExerciseSetGenerator]
 
 
 # ------------------------------------------------------------- dependencies
@@ -50,6 +69,13 @@ def get_transcriber_factory() -> TranscriberFactory:
 def get_analyzer_factory() -> AnalyzerFactory:
     def factory() -> ClaudeAnalyzer:
         return ClaudeAnalyzer(config.get_anthropic_api_key())
+
+    return factory
+
+
+def get_generator_factory() -> GeneratorFactory:
+    def factory() -> ExerciseSetGenerator:
+        return ExerciseSetGenerator(config.get_anthropic_api_key())
 
     return factory
 
@@ -91,7 +117,29 @@ def _session_summary(session: Session) -> Dict[str, Any]:
         "language": session.language_key,
         "status": session.status,
         "has_analysis": session.analysis_path.is_file(),
+        "kind": session.kind,
+        "input_mode": session.input_mode,
     }
+
+
+def _has_image(session: Session) -> bool:
+    return session.image_path is not None and session.image_path.is_file()
+
+
+async def _read_image_upload(image: Optional[UploadFile]) -> tuple:
+    """The uploaded picture's bytes and sniffed media type, or a 400."""
+    data = await image.read() if image is not None else b""
+    if not data:
+        raise HTTPException(status_code=400, detail="Добавьте картинку, которую нужно описать.")
+    if len(data) > config.IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="Картинка слишком большая (больше 5 МБ).")
+    media_type = utils.sniff_image_type(data)
+    if media_type is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Этот формат картинки не поддерживается (нужен JPEG, PNG, WebP или GIF).",
+        )
+    return data, media_type
 
 
 def _transcribe_session(
@@ -109,8 +157,18 @@ def _transcribe_session(
         # figure it bills on (the app still never decodes audio itself).
         audio_seconds = result.audio_duration or session.duration_seconds
         learner_store.record_deepgram_usage(
-            "transcription", profile.key, audio_seconds, session_id=session.id
+            "speech_drill" if session.is_drill else "transcription",
+            profile.key,
+            audio_seconds,
+            session_id=session.id,
         )
+        if session.is_drill:
+            # Logged before session.json says "done", so a screen that reloads
+            # the moment polling ends already sees the attempt.
+            try:
+                learner_store.record_speech_drill(session)
+            except Exception:  # the transcript is saved; the score is extra
+                logger.exception("Could not log the drill result of %s", session.id)
     except TranscriptionError as exc:
         logger.error("Transcription failed for %s: %s", session.id, exc)
         session.status = utils.STATUS_ERROR
@@ -121,6 +179,38 @@ def _transcribe_session(
         session.error_message = f"Unexpected error: {exc}"
     finally:
         utils.write_session_meta(session)
+
+
+def _drill_meta(
+    kind: str,
+    prompt_index: Optional[int],
+    series: Optional[str],
+    source_session_id: Optional[str],
+    passage: Optional[int],
+) -> Dict[str, Any]:
+    """What a drill take practises, checked before anything is saved."""
+    if kind == config.KIND_TALK:
+        if prompt_index is None or not 0 <= prompt_index < len(config.SPEAKING_PROMPTS):
+            raise HTTPException(status_code=400, detail="Unknown speaking prompt.")
+        if series is None:
+            return {"prompt_index": prompt_index, "series": None, "round": 1}
+        first = _load_session_or_404(series)
+        if first.kind != config.KIND_TALK or (first.drill or {}).get("series") != first.id:
+            raise HTTPException(status_code=400, detail="Not the first take of a talk series.")
+        return {
+            "prompt_index": (first.drill or {}).get("prompt_index", prompt_index),
+            "series": first.id,
+            "round": learner_store.talk_round(first.id),
+        }
+    if source_session_id is None or passage is None:
+        raise HTTPException(status_code=400, detail="Name the recording and passage to read.")
+    source = _load_session_or_404(source_session_id)
+    found = next(
+        (p for p in learner_store.shadowing_passages(source.id) if p["index"] == passage), None
+    )
+    if found is None:
+        raise HTTPException(status_code=404, detail="Unknown passage.")
+    return {"source_session_id": source.id, "passage": passage, "reference": found["text"]}
 
 
 # ---------------------------------------------------------------- /config
@@ -134,6 +224,13 @@ def get_config() -> Dict[str, Any]:
         "default_language": config.default_profile().key,
         "deepgram_configured": config.get_api_key() is not None,
         "anthropic_configured": config.get_anthropic_api_key() is not None,
+        "speaking_prompts": [
+            {"index": index, "question": question, "hint": hint}
+            for index, (question, hint) in enumerate(config.SPEAKING_PROMPTS)
+        ],
+        "image_max_side": config.IMAGE_MAX_SIDE_PX,
+        "talk_seconds": config.TALK_SECONDS,
+        "talk_rounds": config.TALK_ROUNDS,
     }
 
 
@@ -141,15 +238,48 @@ def get_config() -> Dict[str, Any]:
 @router.post("/sessions", status_code=202)
 async def create_session(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
+    kind: str = Form(config.KIND_MONOLOGUE),
+    image: Optional[UploadFile] = File(None),
     language: str = Form(config.DEFAULT_LANGUAGE_KEY),
     client_duration_seconds: float = Form(0.0),
     mime_type: str = Form(""),
+    prompt_index: Optional[int] = Form(None),
+    series: Optional[str] = Form(None),
+    source_session_id: Optional[str] = Form(None),
+    passage: Optional[int] = Form(None),
     transcriber_factory: TranscriberFactory = Depends(get_transcriber_factory),
 ) -> Dict[str, Any]:
+    """A new take: an audio `file` (transcribed in the background) or a typed
+    `text` (done at once). A picture description also carries its `image`;
+    a «60 секунд» take its `prompt_index` and, from round 2 on, its `series`;
+    a shadowing take the `source_session_id` and `passage` it reads."""
     profile = config.profile_by_key(language)
-    audio_bytes = await file.read()
-    if not audio_bytes:
+    if kind not in config.SESSION_KINDS:
+        raise HTTPException(status_code=400, detail="Unknown activity kind.")
+    if (file is None) == (text is None):
+        raise HTTPException(status_code=400, detail="Send either a recording or a text.")
+    drill: Optional[Dict[str, Any]] = None
+    if kind in config.DRILL_KINDS:
+        if file is None:
+            raise HTTPException(status_code=400, detail="A spoken drill needs a recording.")
+        drill = _drill_meta(kind, prompt_index, series, source_session_id, passage)
+        if kind == config.KIND_SHADOWING:
+            # The passage is English whatever the source recording's language.
+            profile = config.profile_by_key(config.DEFAULT_LANGUAGE_KEY)
+    if text is not None:
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="The text is empty.")
+        if len(text) > config.TYPED_TEXT_MAX_CHARS:
+            raise HTTPException(status_code=400, detail="The text is too long.")
+    image_upload = None
+    if kind == config.KIND_PICTURE:
+        image_upload = await _read_image_upload(image)
+    elif image is not None:
+        raise HTTPException(status_code=400, detail="Only a picture description takes an image.")
+    audio_bytes = await file.read() if file is not None else b""
+    if file is not None and not audio_bytes:
         raise HTTPException(status_code=400, detail="The uploaded recording is empty.")
 
     try:
@@ -158,14 +288,34 @@ async def create_session(
         logger.exception("Could not create the session directory")
         raise HTTPException(status_code=500, detail=f"Could not create the recordings folder: {exc}")
 
-    session.audio_filename = "audio" + config.extension_for_mime(mime_type or file.content_type)
+    session.kind = kind
     session.language_key = profile.key
-    session.duration_seconds = client_duration_seconds
-
+    session.drill = drill
+    if drill is not None and kind == config.KIND_TALK and drill["series"] is None:
+        # Round 1 of a talk starts its own series, named after itself.
+        session.drill = {**drill, "series": session.id}
     try:
+        if image_upload is not None:
+            image_bytes, media_type = image_upload
+            session.image_filename = (
+                config.IMAGE_FILENAME_STEM + config.IMAGE_EXTENSIONS_BY_MEDIA_TYPE[media_type]
+            )
+            session.image_path.write_bytes(image_bytes)
+        if text is not None:
+            # Typed by hand: the text is the transcript, stored exactly as typed.
+            session.input_mode = config.INPUT_TEXT
+            utils.write_transcript(session, text, profile)
+            session.transcript = text
+            session.status = utils.STATUS_DONE
+            utils.write_session_meta(session)
+            return {"session_id": session.id, "status": session.status}
+        session.audio_filename = "audio" + config.extension_for_mime(
+            mime_type or file.content_type
+        )
+        session.duration_seconds = client_duration_seconds
         session.audio_path.write_bytes(audio_bytes)
     except OSError as exc:
-        logger.exception("Could not save the uploaded recording")
+        logger.exception("Could not save the upload")
         raise HTTPException(status_code=500, detail=f"Could not save the recording: {exc}")
 
     if client_duration_seconds < config.MIN_RECORDING_SECONDS:
@@ -201,7 +351,14 @@ def get_session(session_id: str) -> Dict[str, Any]:
         "error_message": session.error_message,
         "transcript": session.transcript,
         "audio_url": f"/api/sessions/{session.id}/audio" if session.audio_path.is_file() else None,
+        "image_url": f"/api/sessions/{session.id}/image" if _has_image(session) else None,
         "analysis": _read_analysis(session),
+        "drill": session.drill,
+        "speech": (
+            learner_store.speech_report(session)
+            if session.status == utils.STATUS_DONE
+            else None
+        ),
     }
 
 
@@ -212,6 +369,15 @@ def get_session_audio(session_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="No audio recorded for this session.")
     media_type = mimetypes.guess_type(str(session.audio_path))[0] or "application/octet-stream"
     return FileResponse(session.audio_path, media_type=media_type)
+
+
+@router.get("/sessions/{session_id}/image")
+def get_session_image(session_id: str) -> FileResponse:
+    session = _load_session_or_404(session_id)
+    if not _has_image(session):
+        raise HTTPException(status_code=404, detail="No picture for this session.")
+    media_type = mimetypes.guess_type(str(session.image_path))[0] or "application/octet-stream"
+    return FileResponse(session.image_path, media_type=media_type)
 
 
 class AnalyzeRequest(BaseModel):
@@ -225,6 +391,8 @@ def analyze_session(
     analyzer_factory: AnalyzerFactory = Depends(get_analyzer_factory),
 ) -> Dict[str, Any]:
     session = _load_session_or_404(session_id)
+    if session.is_drill:
+        raise HTTPException(status_code=400, detail="Речевые тренажёры не анализируются Claude.")
     if not session.transcript:
         raise HTTPException(status_code=400, detail="This session has no transcript yet.")
 
@@ -232,17 +400,35 @@ def analyze_session(
     if cached is not None and not body.force:
         return {"session_id": session.id, "analysis": cached, "progress_updated": False}
 
+    picture = session.kind == config.KIND_PICTURE
+    image = None
+    if picture:
+        if not _has_image(session):
+            raise HTTPException(status_code=400, detail="The picture of this session is missing.")
+        image_bytes = session.image_path.read_bytes()
+        media_type = utils.sniff_image_type(image_bytes)
+        if media_type is None:
+            raise HTTPException(status_code=400, detail="The session's picture is unreadable.")
+        image = ImageInput(data=image_bytes, media_type=media_type)
+    typed = session.input_mode == config.INPUT_TEXT
+
     analyzer = analyzer_factory()
     profile = config.profile_by_key(session.language_key)
     try:
-        result = analyzer.analyze(session.transcript, profile, session.duration_seconds)
+        result = analyzer.analyze(
+            session.transcript, profile, session.duration_seconds, image=image, typed=typed
+        )
     except MissingAnthropicApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except AnalysisError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
+    # A separate purpose, so the real price of each activity shows in the usage log.
     usage_record = learner_store.record_claude_usage(
-        "analysis", result.model, result.usage, session_id=session.id
+        "picture_analysis" if picture else "analysis",
+        result.model,
+        result.usage,
+        session_id=session.id,
     )
     analysis_payload: Dict[str, Any] = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
@@ -250,6 +436,8 @@ def analyze_session(
         "model": result.model,
         "effort": result.effort,
         "language": session.language_key,
+        "kind": session.kind,
+        "input_mode": session.input_mode,
         "summary": result.summary,
         "strengths": result.strengths,
         "issues": [issue.model_dump() for issue in result.issues],
@@ -258,6 +446,14 @@ def analyze_session(
         "takeaways": [item.model_dump() for item in result.takeaways],
         "scores": result.scores.model_dump() if result.scores else None,
         "overall_score": result.overall_score,
+        **(
+            {
+                "not_mentioned": [item.model_dump() for item in result.not_mentioned],
+                "scene_vocabulary": [item.model_dump() for item in result.scene_vocabulary],
+            }
+            if picture
+            else {}
+        ),
         "topic_counts": result.topic_counts,
         "request_id": result.request_id,
         "usage": {**result.usage, "cost_usd": usage_record["cost_usd"]},
@@ -393,6 +589,18 @@ def get_learner_texts(topic: Optional[str] = None) -> Dict[str, Any]:
     return {"topic": topic, "texts": learner_store.practice_texts(topic)}
 
 
+@router.get("/learner/today")
+def get_learner_today() -> Dict[str, Any]:
+    """The «Сегодня» workout: cards, a topic drill and a live activity."""
+    return learner_store.today_workout()
+
+
+@router.get("/learner/history")
+def get_learner_history() -> Dict[str, Any]:
+    """Exercise results per day, newest first."""
+    return {"days": learner_store.activity_history()}
+
+
 @router.get("/learner/topics")
 def get_learner_topics() -> Dict[str, Any]:
     return {"topics": learner_store.topic_mastery()}
@@ -401,3 +609,235 @@ def get_learner_topics() -> Dict[str, Any]:
 @router.get("/usage")
 def get_usage() -> Dict[str, Any]:
     return learner_store.usage_summary()
+
+
+# ----------------------------------------------------------------- /speech
+@router.get("/speech/passages")
+def get_shadowing_passages() -> Dict[str, Any]:
+    """Passages to read aloud, and which one to take next."""
+    passages = learner_store.shadowing_passages()
+    return {"passages": passages, "next": speech_drills.pick_passage(passages)}
+
+
+@router.get("/speech/talks")
+def get_talk_series() -> Dict[str, Any]:
+    """«60 секунд» series with every round's measurements, newest first."""
+    today = dt.date.today()
+    return {
+        "series": learner_store.talk_series(),
+        "prompt_index": speech_drills.talk_prompt_index(today),
+    }
+
+
+# ------------------------------------------------------ /practice/sets
+# AI exercise sets (Stage 5): generated only on an explicit click, stored in
+# data/practice/, redone for free. Gaps and fixes are checked in the browser;
+# free translations are graded by Claude in one call when the set is handed in.
+_SET_ID_PATTERN = r"^set-[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$"
+
+
+def _set_or_404(set_id: str) -> Dict[str, Any]:
+    # The id becomes a file name: only the exact generated shape is accepted.
+    if not re.fullmatch(_SET_ID_PATTERN, set_id):
+        raise HTTPException(status_code=400, detail="Invalid set id.")
+    exercise_set = learner_store.load_set(set_id)
+    if exercise_set is None:
+        raise HTTPException(status_code=404, detail="Unknown exercise set.")
+    return exercise_set
+
+
+def _check_set_topic(topic: str) -> None:
+    if topic not in progress_store.TOPIC_TAXONOMY:
+        raise HTTPException(status_code=404, detail="Unknown topic.")
+    if not learner_model.set_topic_allowed(topic):
+        raise HTTPException(
+            status_code=400, detail="По этой теме наборы упражнений не составляются."
+        )
+
+
+def _set_payload(exercise_set: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
+    return {
+        "set": {k: v for k, v in exercise_set.items() if k != "verdicts"},
+        "summary": learner_store.set_summary(exercise_set),
+        **extra,
+    }
+
+
+class CreateSetRequest(BaseModel):
+    topic: str = Field(pattern=_SLUG_PATTERN)
+    force: bool = False
+
+
+@router.get("/practice/sets")
+def list_exercise_sets(topic: Optional[str] = None) -> Dict[str, Any]:
+    """Sets (newest first) plus what one more would cost, for the button."""
+    if topic is not None:
+        _check_set_topic(topic)
+    return {
+        "topic": topic,
+        "sets": [learner_store.set_summary(s) for s in learner_store.list_sets(topic)],
+        "cost_estimate_usd": learner_store.set_cost_estimate(),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+@router.post("/practice/sets")
+def create_exercise_set(
+    body: CreateSetRequest,
+    generator_factory: GeneratorFactory = Depends(get_generator_factory),
+) -> Dict[str, Any]:
+    """Generate a set on a topic (a paid call). An unstarted set on the topic
+    is handed back instead unless `force` - a second click costs nothing."""
+    _check_set_topic(body.topic)
+    if not body.force:
+        waiting = learner_store.unstarted_set(body.topic)
+        if waiting is not None:
+            return _set_payload(waiting, reused=True)
+
+    topic = learner_store.topic_info(body.topic)
+    generator = generator_factory()
+    try:
+        result = generator.generate(
+            topic,
+            learner_store.set_seeds(body.topic),
+            learner_store.set_avoid_sentences(body.topic),
+        )
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    set_id = learner_store.new_set_id()
+    usage = learner_store.record_claude_usage(
+        "exercise_set", result.call.model, result.call.usage, set_id=set_id
+    )
+    exercise_set = {
+        "schema_version": learner_store.SET_SCHEMA_VERSION,
+        "id": set_id,
+        "topic": body.topic,
+        "language": "en",
+        "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "intro": result.intro,
+        "exercises": result.exercises,
+        "generation": {
+            "model": result.call.model,
+            "effort": result.call.effort,
+            "request_id": result.call.request_id,
+            "usage": {**result.call.usage, "cost_usd": usage["cost_usd"]},
+        },
+        "runs": [],
+    }
+    learner_store.save_set(exercise_set)
+    return _set_payload(exercise_set, reused=False)
+
+
+@router.get("/practice/sets/{set_id}")
+def get_exercise_set(set_id: str) -> Dict[str, Any]:
+    return _set_payload(_set_or_404(set_id))
+
+
+class SetAnswer(BaseModel):
+    """One answer. `correct` is the browser's verdict for a gap or a fix (the
+    learner may overrule an exact-match miss) or the learner's own grade of a
+    translation when Claude could not grade it; left out, the server decides."""
+
+    exercise_id: str = Field(pattern=r"^ex[0-9]{1,3}$")
+    answer: str = Field(default="", max_length=1000)
+    correct: Optional[bool] = None
+
+
+class SubmitSetRequest(BaseModel):
+    answers: List[SetAnswer] = Field(max_length=50)
+    context: Optional[str] = Field(default=None, pattern=_SLUG_PATTERN)
+
+
+@router.post("/practice/sets/{set_id}/submit")
+def submit_exercise_set(
+    set_id: str,
+    body: SubmitSetRequest,
+    generator_factory: GeneratorFactory = Depends(get_generator_factory),
+) -> Dict[str, Any]:
+    """Hand in a whole set: grade what is left, log the run, make cards."""
+    exercise_set = _set_or_404(set_id)
+    exercises = {e["id"]: e for e in exercise_set.get("exercises") or []}
+    answers = {a.exercise_id: a for a in body.answers}
+    if len(answers) != len(body.answers) or set(answers) != set(exercises):
+        raise HTTPException(status_code=400, detail="Answer every exercise of the set once.")
+
+    results: List[Dict[str, Any]] = []
+    pending: List[TranslationAnswer] = []
+    for exercise_id, exercise in exercises.items():
+        given = answers[exercise_id]
+        text = given.answer.strip()
+        result: Dict[str, Any] = {
+            "exercise_id": exercise_id,
+            "type": exercise["type"],
+            "answer": text,
+        }
+        if exercise["type"] != exercise_sets.TYPE_TRANSLATE:
+            matched = learner_model.answer_matches(text, exercise.get("accept") or [])
+            result["correct"] = matched if given.correct is None else given.correct
+            result["graded_by"] = "browser" if given.correct is not None else "match"
+        elif given.correct is not None:
+            result.update(correct=given.correct, graded_by="self")
+        elif not text:
+            result.update(
+                correct=False,
+                graded_by="empty",
+                comment="Ответа нет.",
+                corrected=exercise["reference"],
+            )
+        elif learner_model.answer_matches(text, [exercise["reference"]]):
+            result.update(correct=True, graded_by="match", comment="", corrected=text)
+        else:
+            cached = learner_store.cached_verdict(exercise_set, exercise_id, text)
+            if cached is not None:
+                result.update(cached, graded_by="cache")
+            else:
+                pending.append(
+                    TranslationAnswer(
+                        exercise_id=exercise_id,
+                        russian=exercise["russian"],
+                        reference=exercise["reference"],
+                        focus=exercise.get("focus", ""),
+                        answer=text,
+                    )
+                )
+        results.append(result)
+
+    grading: Optional[Dict[str, Any]] = None
+    if pending:
+        generator = generator_factory()
+        try:
+            graded = generator.grade(learner_store.topic_info(exercise_set["topic"]), pending)
+        except MissingAnthropicApiKeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except AnalysisError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        usage = learner_store.record_claude_usage(
+            "exercise_grading", graded.call.model, graded.call.usage, set_id=set_id
+        )
+        grading = {
+            "model": graded.call.model,
+            "request_id": graded.call.request_id,
+            "usage": {**graded.call.usage, "cost_usd": usage["cost_usd"]},
+        }
+        missing = [p.exercise_id for p in pending if p.exercise_id not in graded.verdicts]
+        if missing:
+            raise HTTPException(
+                status_code=502, detail="Claude проверил не все ответы. Попробуйте ещё раз."
+            )
+        for result in results:
+            verdict = graded.verdicts.get(result["exercise_id"])
+            if verdict is not None and "graded_by" not in result:
+                result.update(verdict, graded_by="claude")
+
+    recorded = learner_store.record_set_run(
+        set_id, results, context=body.context, grading=grading
+    )
+    return {
+        "set_id": set_id,
+        "run": recorded["run"],
+        "new_cards": recorded["new_cards"],
+        "summary": recorded["set"],
+    }

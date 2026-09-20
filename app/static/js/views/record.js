@@ -2,19 +2,20 @@
 // for the transcript -> on-demand Claude analysis. Replaces the old
 // sounddevice/Tkinter recording loop; the same overall states apply
 // (ready -> recording -> transcribing -> done/error).
+//
+// The same view runs the picture description (#/picture, Views.picture at the
+// bottom): a picture is chosen, downscaled in the browser and uploaded with
+// the take, which can be spoken (default) or typed.
 window.Views = window.Views || {};
 
 Views.record = (() => {
-  let stream = null;
-  let mediaRecorder = null;
-  let chunks = [];
-  let audioCtx = null;
-  let analyser = null;
-  let rafId = null;
-  let timerId = null;
+  let recorder = null;
   let pollTimer = null;
-  let startTime = null;
   let container = null;
+  // Picture mode: the downscaled JPEG to upload with every take.
+  let pictureBlob = null;
+  let pictureUrl = null;
+  let onPaste = null;
 
   function el(html) {
     // Returns a DocumentFragment so multiple top-level sibling elements in
@@ -28,14 +29,6 @@ Views.record = (() => {
     return fragment;
   }
 
-  function pickMimeType() {
-    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg"];
-    for (const type of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported(type)) return type;
-    }
-    return "";
-  }
-
   function setStatus(text, cls) {
     const badge = container.querySelector("#status-badge");
     badge.textContent = text;
@@ -47,16 +40,81 @@ Views.record = (() => {
     if (bar) bar.style.width = `${Math.min(100, Math.max(0, percent))}%`;
   }
 
-  async function render(root) {
+  // Draws the image onto a canvas with its long side at most `maxSide` px and
+  // re-encodes it as JPEG: fewer tokens for Claude, and no EXIF data leaves
+  // the browser. Transparent areas become white instead of black.
+  function downscaleImage(file, maxSide) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error("не удалось сжать картинку"))),
+          "image/jpeg",
+          0.85
+        );
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("браузер не смог открыть этот файл как картинку"));
+      };
+      img.src = url;
+    });
+  }
+
+  function pictureCard() {
+    return `
+      <div class="picture-picker">
+        <div id="picture-drop" class="picture-drop">
+          <img id="picture-preview" class="picture-preview" alt="Картинка для описания" hidden />
+          <div id="picture-empty" class="picture-empty">
+            <span class="activity-icon" aria-hidden="true">🖼️</span>
+            <p>Перетащите картинку сюда или вставьте из буфера (Ctrl+V)</p>
+            <label class="button-like">Выбрать файл
+              <input type="file" id="picture-input" accept="image/*" hidden /></label>
+          </div>
+        </div>
+        <div class="picture-toolbar">
+          <label class="button-like secondary" id="picture-change" hidden>Другая картинка
+            <input type="file" id="picture-input-2" accept="image/*" hidden /></label>
+          <div class="segmented" role="radiogroup" aria-label="Как описывать">
+            <label><input type="radio" name="input-mode" value="voice" checked /> Голосом</label>
+            <label><input type="radio" name="input-mode" value="text" /> Текстом</label>
+          </div>
+        </div>
+      </div>
+      <p class="muted">Опишите картинку: кто на ней, где это, что происходит, какое настроение.
+        1–2 минуты. После анализа Claude подскажет, что вы не упомянули, и даст слова для этой сцены.</p>`;
+  }
+
+  // `param` is a speaking-prompt index when the view is opened from «Сегодня»
+  // (#/record/<index>); a plain #/record is a free monologue. `mode` is
+  // "picture" for the picture description.
+  async function render(root, param, mode) {
     container = root;
+    const picture = mode === "picture";
+    const promptIndex = !picture && /^\d+$/.test(param || "") ? Number(param) : null;
     container.appendChild(
       el(`
+      ${promptIndex == null ? "" : `<p><a href="#/today">← Сегодня</a></p>`}
+      ${picture ? `<p><a href="#/practice">← Занятия</a></p>` : ""}
       <div class="card">
-        <h2>Запись</h2>
-        <p class="muted">Говорите свободно — слова-паразиты, паузы, ошибки и незаконченные фразы
+        <h2>${picture ? "Описание картинки" : "Монолог"}</h2>
+        <div id="prompt-slot"></div>
+        ${picture ? pictureCard() : ""}
+        <p class="muted" id="voice-hint">Говорите свободно — слова-паразиты, паузы, ошибки и незаконченные фразы
           сохраняются как есть, это важно для последующего анализа.</p>
         <div class="row">
-          <div>
+          <div id="mic-field">
             <label for="mic-select">Микрофон</label>
             <select id="mic-select"></select>
           </div>
@@ -65,19 +123,28 @@ Views.record = (() => {
             <select id="lang-select"></select>
           </div>
         </div>
-        <div class="status-line">
-          <span id="status-badge" class="status-badge status-ready">Готово</span>
-          <span id="timer" class="timer">00:00</span>
+        <div id="voice-controls">
+          <div class="status-line">
+            <span id="status-badge" class="status-badge status-ready">Готово</span>
+            <span id="timer" class="timer">00:00</span>
+          </div>
+          <div class="level-meter"><div id="level-bar"></div></div>
+          <div class="button-row">
+            <button id="start-btn">Начать запись</button>
+            <button id="stop-btn" class="danger" disabled>Остановить</button>
+          </div>
         </div>
-        <div class="level-meter"><div id="level-bar"></div></div>
-        <div class="button-row">
-          <button id="start-btn">Начать запись</button>
-          <button id="stop-btn" class="danger" disabled>Остановить</button>
+        <div id="text-controls" hidden>
+          <label for="typed-text">Ваше описание</label>
+          <textarea id="typed-text" rows="7" maxlength="10000"
+            placeholder="In this picture I can see..."></textarea>
+          <p class="muted">Текст сохраняется как есть — опечатки и ошибки тоже, их разберёт анализ.</p>
+          <div class="button-row"><button id="send-text-btn">Отправить</button></div>
         </div>
         <p id="message" class="muted"></p>
       </div>
       <div class="card" id="transcript-card" hidden>
-        <h2>Транскрипт</h2>
+        <h2 id="transcript-title">Транскрипт</h2>
         <div id="transcript" class="transcript-box"></div>
         <div class="button-row">
           <button id="analyze-btn" class="secondary">Анализировать (Claude)</button>
@@ -107,6 +174,26 @@ Views.record = (() => {
       .join("");
     langSelect.value = cfg.default_language;
 
+    if (promptIndex != null && cfg.speaking_prompts.length) {
+      let shown = promptIndex % cfg.speaking_prompts.length;
+      const slot = container.querySelector("#prompt-slot");
+      const showPrompt = () => {
+        const prompt = cfg.speaking_prompts[shown];
+        slot.innerHTML = `
+          <div class="speaking-prompt">
+            <div class="muted">Тема: ${escapeHtml(prompt.hint)}</div>
+            <p class="speaking-question">${escapeHtml(prompt.question)}</p>
+            <p class="muted">Говорите 1–3 минуты. Потом нажмите «Анализировать» — ошибки попадут в карточки.</p>
+            <button type="button" class="secondary" id="next-prompt">Другая тема</button>
+          </div>`;
+        slot.querySelector("#next-prompt").addEventListener("click", () => {
+          shown = (shown + 1) % cfg.speaking_prompts.length;
+          showPrompt();
+        });
+      };
+      showPrompt();
+    }
+
     const warnings = [];
     if (!cfg.deepgram_configured) {
       warnings.push("DEEPGRAM_API_KEY не настроен — распознавание речи не будет работать.");
@@ -116,62 +203,132 @@ Views.record = (() => {
     }
     message.textContent = warnings.join(" ");
 
-    async function populateMics() {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const mics = devices.filter((d) => d.kind === "audioinput");
-        micSelect.innerHTML = mics.length
-          ? mics.map((d, i) => `<option value="${d.deviceId}">${escapeHtml(d.label || "Микрофон " + (i + 1))}</option>`).join("")
-          : `<option value="">Микрофон не найден</option>`;
-      } catch (err) {
-        micSelect.innerHTML = `<option value="">(нет доступа к устройствам)</option>`;
-      }
-    }
-    await populateMics();
+    if (picture) setupPicture(cfg);
 
-    function tick() {
-      const elapsed = (Date.now() - startTime) / 1000;
-      container.querySelector("#timer").textContent = formatDuration(elapsed);
-      if (analyser) {
-        const data = new Uint8Array(analyser.frequencyBinCount);
-        analyser.getByteTimeDomainData(data);
-        let peak = 0;
-        for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i] - 128) / 128);
-        setLevel(peak * 160);
+    await Recorder.fillMics(micSelect);
+
+    function setupPicture(cfg) {
+      const preview = container.querySelector("#picture-preview");
+      const empty = container.querySelector("#picture-empty");
+      const change = container.querySelector("#picture-change");
+      const drop = container.querySelector("#picture-drop");
+      const sendText = container.querySelector("#send-text-btn");
+
+      const refresh = () => {
+        const ready = !!pictureBlob;
+        preview.hidden = !ready;
+        empty.hidden = ready;
+        change.hidden = !ready;
+        startBtn.disabled = !ready || (recorder && recorder.recording);
+        sendText.disabled = !ready;
+      };
+
+      async function usePicture(file) {
+        if (!file || !file.type.startsWith("image/")) {
+          message.textContent = "Это не картинка — выберите файл изображения.";
+          return;
+        }
+        try {
+          pictureBlob = await downscaleImage(file, cfg.image_max_side || 1000);
+        } catch (err) {
+          message.textContent = `Не удалось открыть картинку: ${err.message}`;
+          return;
+        }
+        if (pictureUrl) URL.revokeObjectURL(pictureUrl);
+        pictureUrl = URL.createObjectURL(pictureBlob);
+        preview.src = pictureUrl;
+        message.textContent = "";
+        container.querySelector("#transcript-card").hidden = true;
+        refresh();
       }
-      rafId = requestAnimationFrame(tick);
+
+      container.querySelectorAll('input[type="file"]').forEach((input) =>
+        input.addEventListener("change", () => {
+          usePicture(input.files[0]);
+          input.value = "";
+        })
+      );
+      drop.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        drop.classList.add("is-dragover");
+      });
+      drop.addEventListener("dragleave", () => drop.classList.remove("is-dragover"));
+      drop.addEventListener("drop", (event) => {
+        event.preventDefault();
+        drop.classList.remove("is-dragover");
+        usePicture(event.dataTransfer.files[0]);
+      });
+      // Paste anywhere on the page, unless the user is typing into the text box.
+      onPaste = (event) => {
+        if (event.target && event.target.id === "typed-text") return;
+        const item = [...(event.clipboardData ? event.clipboardData.items : [])].find((i) =>
+          i.type.startsWith("image/")
+        );
+        if (item) {
+          event.preventDefault();
+          usePicture(item.getAsFile());
+        }
+      };
+      document.addEventListener("paste", onPaste);
+
+      container.querySelectorAll('input[name="input-mode"]').forEach((radio) =>
+        radio.addEventListener("change", () => {
+          const typed = radio.value === "text" && radio.checked;
+          container.querySelector("#voice-controls").hidden = typed;
+          container.querySelector("#mic-field").hidden = typed;
+          container.querySelector("#voice-hint").hidden = typed;
+          container.querySelector("#text-controls").hidden = !typed;
+        })
+      );
+
+      sendText.addEventListener("click", async () => {
+        const text = container.querySelector("#typed-text").value;
+        if (!text.trim()) {
+          message.textContent = "Напишите описание перед отправкой.";
+          return;
+        }
+        sendText.disabled = true;
+        message.textContent = "Сохраняем...";
+        try {
+          const result = await Api.submitText({
+            text,
+            language: langSelect.value,
+            kind: "picture",
+            image: pictureBlob,
+          });
+          message.textContent = "";
+          await showTranscript(await Api.getSession(result.session_id));
+        } catch (err) {
+          message.textContent = `Не удалось сохранить текст: ${err.message}`;
+        } finally {
+          sendText.disabled = !pictureBlob;
+        }
+      });
+
+      refresh();
     }
 
     startBtn.addEventListener("click", async () => {
       message.textContent = "";
+      if (picture && !pictureBlob) {
+        message.textContent = "Сначала выберите картинку.";
+        return;
+      }
+      recorder = Recorder.create({
+        onTick: (elapsed, level) => {
+          container.querySelector("#timer").textContent = formatDuration(elapsed);
+          setLevel(level * 160);
+        },
+        onStop: onRecordingStopped,
+      });
       try {
-        const deviceId = micSelect.value;
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: deviceId ? { deviceId: { exact: deviceId } } : true,
-        });
+        await recorder.start(micSelect.value);
       } catch (err) {
+        recorder = null;
         message.textContent = `Не удалось получить доступ к микрофону: ${err.message}`;
         return;
       }
-      await populateMics(); // device labels only appear once permission is granted
-
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaStreamSource(stream);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512;
-      source.connect(analyser);
-
-      chunks = [];
-      const mimeType = pickMimeType();
-      mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      mediaRecorder.addEventListener("dataavailable", (event) => {
-        if (event.data && event.data.size > 0) chunks.push(event.data);
-      });
-      mediaRecorder.addEventListener("stop", onRecordingStopped);
-      mediaRecorder.start();
-
-      startTime = Date.now();
-      rafId = requestAnimationFrame(tick);
+      await Recorder.fillMics(micSelect); // device labels only appear once permission is granted
 
       setStatus("Запись...", "recording");
       startBtn.disabled = true;
@@ -182,34 +339,24 @@ Views.record = (() => {
     });
 
     stopBtn.addEventListener("click", () => {
-      if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+      if (recorder) recorder.stop();
     });
 
-    async function onRecordingStopped() {
-      cancelAnimationFrame(rafId);
-      const durationSeconds = (Date.now() - startTime) / 1000;
-      stream.getTracks().forEach((t) => t.stop());
-      if (audioCtx) {
-        try {
-          await audioCtx.close();
-        } catch (err) {
-          /* already closed */
-        }
-      }
-
-      startBtn.disabled = false;
+    async function onRecordingStopped({ blob, durationSeconds }) {
+      startBtn.disabled = picture && !pictureBlob;
       stopBtn.disabled = true;
       micSelect.disabled = false;
       langSelect.disabled = false;
       setLevel(0);
       setStatus("Транскрибируется...", "transcribing");
 
-      const blob = new Blob(chunks, { type: (mediaRecorder && mediaRecorder.mimeType) || "audio/webm" });
       try {
         const result = await Api.uploadSession(blob, {
           language: langSelect.value,
           durationSeconds,
           mimeType: blob.type,
+          kind: picture ? "picture" : "monologue",
+          image: picture ? pictureBlob : null,
         });
         if (result.status === "error") {
           setStatus("Ошибка", "error");
@@ -251,6 +398,8 @@ Views.record = (() => {
     async function showTranscript(session) {
       const card = container.querySelector("#transcript-card");
       card.hidden = false;
+      container.querySelector("#transcript-title").textContent =
+        session.input_mode === "text" ? "Ваш текст" : "Транскрипт";
       container.querySelector("#transcript").textContent = session.transcript || "(пустой транскрипт)";
 
       const analyzeBtn = container.querySelector("#analyze-btn");
@@ -287,25 +436,21 @@ Views.record = (() => {
   }
 
   function dispose() {
+    if (onPaste) document.removeEventListener("paste", onPaste);
+    onPaste = null;
+    if (pictureUrl) URL.revokeObjectURL(pictureUrl);
+    pictureUrl = null;
+    pictureBlob = null;
     clearTimeout(pollTimer);
-    cancelAnimationFrame(rafId);
-    if (mediaRecorder && mediaRecorder.state !== "inactive") {
-      mediaRecorder.removeEventListener("stop", () => {});
-      try {
-        mediaRecorder.stop();
-      } catch (err) {
-        /* ignore */
-      }
-    }
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-    if (audioCtx) {
-      try {
-        audioCtx.close();
-      } catch (err) {
-        /* ignore */
-      }
-    }
+    if (recorder) recorder.dispose();
+    recorder = null;
   }
 
   return { render, dispose };
 })();
+
+// «Описание картинки» (#/picture): the recorder in picture mode.
+Views.picture = {
+  render: (container, param) => Views.record.render(container, param, "picture"),
+  dispose: () => Views.record.dispose(),
+};

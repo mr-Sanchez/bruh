@@ -22,21 +22,47 @@ const Api = (() => {
     getProgress: () => request("/api/progress"),
     getTopics: () => request("/api/topics"),
 
-    uploadSession: (blob, { language, durationSeconds, mimeType }) => {
+    // `kind` is "monologue", "picture", "talk" or "shadowing"; a picture take
+    // also sends `image`, a drill take what it practises (`drill`: talk -
+    // prompt_index and, from round 2, series; shadowing - source_session_id
+    // and passage).
+    uploadSession: (blob, { language, durationSeconds, mimeType, kind, image, drill }) => {
       const form = new FormData();
       const extension = (mimeType || "").includes("ogg") ? "webm" : "webm";
       form.append("file", blob, `audio.${extension}`);
       form.append("language", language);
       form.append("client_duration_seconds", String(durationSeconds));
       form.append("mime_type", mimeType || blob.type || "");
+      if (kind) form.append("kind", kind);
+      if (image) form.append("image", image, "image.jpg");
+      Object.entries(drill || {}).forEach(([key, value]) => {
+        if (value != null) form.append(key, String(value));
+      });
+      return request("/api/sessions", { method: "POST", body: form });
+    },
+    // A typed take: stored verbatim as the transcript, no speech recognition.
+    submitText: ({ text, language, kind, image }) => {
+      const form = new FormData();
+      form.append("text", text);
+      form.append("language", language);
+      if (kind) form.append("kind", kind);
+      if (image) form.append("image", image, "image.jpg");
       return request("/api/sessions", { method: "POST", body: form });
     },
 
+    // Spoken drills: passages to shadow, «60 секунд» series with measurements.
+    getPassages: () => request("/api/speech/passages"),
+    getTalks: () => request("/api/speech/talks"),
+
+    getToday: () => request("/api/learner/today"),
+    getActivityHistory: () => request("/api/learner/history"),
+    getUsage: () => request("/api/usage"),
     getQueue: () => request("/api/learner/queue"),
     getLearnerTopics: () => request("/api/learner/topics"),
-    getLearnerItems: ({ topic, dueOnly } = {}) => {
+    getLearnerItems: ({ topic, dueOnly, kind } = {}) => {
       const params = new URLSearchParams();
       if (topic) params.set("topic", topic);
+      if (kind) params.set("kind", kind);
       if (dueOnly) params.set("due_only", "true");
       return request(`/api/learner/items?${params}`);
     },
@@ -47,6 +73,25 @@ const Api = (() => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(attempt),
+      }),
+
+    // AI exercise sets: creating one is a paid call (an unstarted set on the
+    // topic is handed back instead unless `force`); submitting grades the
+    // translations in one more call.
+    listSets: (topic) =>
+      request(`/api/practice/sets${topic ? `?topic=${encodeURIComponent(topic)}` : ""}`),
+    getSet: (id) => request(`/api/practice/sets/${encodeURIComponent(id)}`),
+    createSet: (topic, force = false) =>
+      request("/api/practice/sets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, force }),
+      }),
+    submitSet: (id, answers, context) =>
+      request(`/api/practice/sets/${encodeURIComponent(id)}/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers, context: context || null }),
       }),
 
     analyzeSession: (id, force = false) =>
@@ -72,6 +117,11 @@ function formatDuration(totalSeconds) {
   const s = seconds % 60;
   const pad = (n) => String(n).padStart(2, "0");
   return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+// "2.8 ¢" from a USD amount; one decimal is enough at this price range.
+function formatCents(usd) {
+  return `${Math.round((usd || 0) * 1000) / 10} ¢`;
 }
 
 let _topicLabelsCache = null;
@@ -100,7 +150,8 @@ const SCORE_LABELS = [
 ];
 
 // Renders analysis.json. Schema v1 files only have summary + issues; every
-// v2 section below is skipped when its field is missing or empty.
+// later section below is skipped when its field is missing or empty (the
+// picture sections exist only for picture descriptions, schema v3).
 async function renderAnalysis(container, analysis) {
   if (!analysis) {
     container.innerHTML = '<p class="muted">Анализ ещё не выполнялся — нажмите «Анализировать».</p>';
@@ -115,10 +166,30 @@ async function renderAnalysis(container, analysis) {
     ${renderStrengths(analysis.strengths)}
     <h3>Разбор</h3>
     ${issueCards.join("") || '<p class="muted">Заметных ошибок не найдено — отличная запись!</p>'}
+    ${renderNotMentioned(analysis.not_mentioned)}
+    ${renderPhraseSection("Полезные слова для этой сцены", analysis.scene_vocabulary)}
     ${renderPhraseSection("Слова и выражения", analysis.vocabulary)}
     ${renderImprovedVersion(analysis.improved_version)}
     ${renderPhraseSection("Что запомнить из этой записи", analysis.takeaways)}
-    ${renderScores(analysis.scores, analysis.overall_score)}
+    ${renderScores(analysis.scores, analysis.overall_score, analysis.input_mode === "text")}
+  `;
+}
+
+function renderNotMentioned(items) {
+  if (!items || !items.length) return "";
+  return `
+    <h3>Что вы не упомянули</h3>
+    <ul class="scene-list">
+      ${items
+        .map(
+          (item) => `
+        <li>
+          <span class="muted">${escapeHtml(item.detail)}</span>
+          <div class="phrase">${escapeHtml(item.phrase)}</div>
+        </li>`
+        )
+        .join("")}
+    </ul>
   `;
 }
 
@@ -193,17 +264,22 @@ function renderImprovedVersion(text) {
   `;
 }
 
-function renderScores(scores, overall) {
+// A typed text has no delivery: its fluency score is shown but is not part
+// of the overall score (nor of the score history).
+function renderScores(scores, overall, typed = false) {
   if (!scores) return "";
   const rows = SCORE_LABELS.filter(([key]) => scores[key])
-    .map(
-      ([key, label]) => `
-      <tr>
+    .map(([key, label]) => {
+      const excluded = typed && key === "fluency";
+      return `
+      <tr${excluded ? ' class="muted"' : ""}>
         <td>${label}</td>
         <td class="score">${escapeHtml(scores[key].score)}/10</td>
-        <td>${escapeHtml(scores[key].comment)}</td>
-      </tr>`
-    )
+        <td>${escapeHtml(scores[key].comment)}${
+          excluded ? " <em>(текст набран вручную — не входит в итог)</em>" : ""
+        }</td>
+      </tr>`;
+    })
     .join("");
   const overallRow =
     overall != null

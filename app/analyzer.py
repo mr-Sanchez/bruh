@@ -15,6 +15,11 @@ words the speaker was searching for, an improved retelling of the whole
 monologue, a handful of takeaways and per-skill scores (1-10). The retelling
 is a separate field of the analysis - the stored transcript is never touched.
 
+A picture description (Stage 4) is the same call with the picture attached:
+the language feedback is identical, plus what the speaker did not mention
+and words for the scene. A description can also be typed instead of spoken;
+then there is no delivery to judge, so fluency stays out of the overall score.
+
 Design rules, mirrored from app/transcriber.py's shape and testability:
   * feedback is always written in Russian, regardless of what language was
     practiced - the user reads Russian explanations for English *or* Russian
@@ -29,6 +34,7 @@ Design rules, mirrored from app/transcriber.py's shape and testability:
 
 from __future__ import annotations
 
+import base64
 import logging
 import math
 from dataclasses import dataclass, field
@@ -48,8 +54,9 @@ Severity = Literal["minor", "moderate", "major"]
 
 # Bumped whenever the shape of analysis.json changes. v1 had only
 # summary + issues(topic, quote, explanation, correction, severity); the
-# frontend still renders v1 files, it just shows fewer sections.
-ANALYSIS_SCHEMA_VERSION: Final[int] = 2
+# frontend still renders v1 files, it just shows fewer sections. v3 adds
+# kind / input_mode and, for pictures, not_mentioned + scene_vocabulary.
+ANALYSIS_SCHEMA_VERSION: Final[int] = 3
 
 SCORE_MIN: Final[int] = 1
 SCORE_MAX: Final[int] = 10
@@ -106,6 +113,28 @@ class SpeechAnalysis(BaseModel):
     scores: Optional[Scores] = None
 
 
+class SceneDetail(BaseModel):
+    """Something in the picture the speaker left out, and a way to say it."""
+
+    detail: str
+    phrase: str
+
+
+class PictureAnalysis(SpeechAnalysis):
+    """The schema for a picture description: the usual feedback plus the scene."""
+
+    not_mentioned: List[SceneDetail] = Field(default_factory=list)
+    scene_vocabulary: List[KeyPhrase] = Field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ImageInput:
+    """The picture a description is about, as sent to Claude."""
+
+    data: bytes
+    media_type: str
+
+
 class AnalysisError(RuntimeError):
     """A user-facing analysis failure (message is shown in the UI)."""
 
@@ -125,6 +154,9 @@ class AnalysisResult:
     takeaways: List[KeyPhrase] = field(default_factory=list)
     scores: Optional[Scores] = None
     overall_score: Optional[float] = None
+    # Picture descriptions only; empty for a monologue.
+    not_mentioned: List[SceneDetail] = field(default_factory=list)
+    scene_vocabulary: List[KeyPhrase] = field(default_factory=list)
     model: str = config.ANALYSIS_MODEL
     effort: str = config.DEFAULT_ANALYSIS_EFFORT
     request_id: Optional[str] = None
@@ -229,6 +261,35 @@ occasional minor slips.
 If the transcript has no notable issues, return an empty issues list and \
 say so in the summary."""
 
+PICTURE_PROMPT = """
+
+This is a PICTURE DESCRIPTION exercise: the speaker was describing the \
+attached picture. Review the language exactly as above, and additionally:
+- In `summary`, add one sentence (Russian) on how complete and accurate the \
+description was. If the speaker described something that is not in the \
+picture, say so there - content slips are not language issues.
+- `improved_version` retells the speaker's own description; do not add \
+things they did not mention (those go into `not_mentioned`).
+- `not_mentioned`: 3-6 notable things in the picture the speaker did not \
+mention - the main action, people and what they are doing, the setting, \
+the mood, one or two easy-to-name details. `detail` is a short Russian \
+note on what it is; `phrase` is one simple sentence in the practiced \
+language that describes it, at the speaker's level.
+- `scene_vocabulary`: 5-8 words or phrases useful for describing this \
+picture, especially ones the speaker lacked, avoided or described around; \
+include useful positional phrases (in the foreground, on the left, ...) \
+when the speaker did not use them. `phrase` in the practiced language, \
+`meaning` a Russian gloss, `example` a sentence about this picture. Do not \
+repeat anything already in `vocabulary`."""
+
+TYPED_PROMPT = """
+
+The text was TYPED by the learner, not spoken: there are no filler words, \
+hesitations or restarts to find, so do not use the "filler_words_fluency" \
+or "repetition_self_correction" topics. Score `fluency` as how smoothly the \
+text reads (linking words, sentence flow); it is not counted in the overall \
+score."""
+
 
 class ClaudeAnalyzer:
     """Thin, testable wrapper around a single structured-output Claude call."""
@@ -257,8 +318,15 @@ class ClaudeAnalyzer:
         transcript: str,
         profile: "config.LanguageProfile",
         duration_seconds: float = 0.0,
+        *,
+        image: Optional[ImageInput] = None,
+        typed: bool = False,
     ) -> AnalysisResult:
-        """Analyze a verbatim transcript. Never modifies the transcript itself."""
+        """Analyze a verbatim transcript. Never modifies the transcript itself.
+
+        With `image`, the transcript is a description of that picture; with
+        `typed`, the learner wrote it instead of speaking it.
+        """
         if not self._api_key:
             raise MissingAnthropicApiKeyError(config.MISSING_ANTHROPIC_API_KEY_MESSAGE)
         if not transcript.strip():
@@ -267,20 +335,44 @@ class ClaudeAnalyzer:
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             taxonomy=_topic_taxonomy_lines(), score_min=SCORE_MIN, score_max=SCORE_MAX
         )
+        if image is not None:
+            system_prompt += PICTURE_PROMPT
+        if typed:
+            system_prompt += TYPED_PROMPT
+        source = (
+            "Typed text (verbatim, as the learner wrote it)"
+            if typed
+            else f"Recording duration: {utils.format_duration(duration_seconds)}\n\n"
+            "Transcript (verbatim)"
+        )
         user_message = (
             f"Practiced language: {profile.label} ({profile.language})\n"
-            f"Recording duration: {utils.format_duration(duration_seconds)}\n\n"
-            "Transcript (verbatim):\n---\n"
+            f"{source}:\n---\n"
             f"{transcript}\n---\n"
             "Analyze this transcript per your instructions and return the "
             "structured result."
         )
+        content: List[Dict[str, Any]] = []
+        if image is not None:
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.media_type,
+                        "data": base64.standard_b64encode(image.data).decode("ascii"),
+                    },
+                }
+            )
+        content.append({"type": "text", "text": user_message})
 
         logger.info(
-            "Analysis started: model=%s, effort=%s, transcript_chars=%d",
+            "Analysis started: model=%s, effort=%s, transcript_chars=%d, image=%s, typed=%s",
             self._model,
             self._effort,
             len(transcript),
+            image is not None,
+            typed,
         )
 
         try:
@@ -289,8 +381,8 @@ class ClaudeAnalyzer:
                 model=self._model,
                 max_tokens=config.ANALYSIS_MAX_TOKENS,
                 system=system_prompt,
-                messages=[{"role": "user", "content": user_message}],
-                output_format=SpeechAnalysis,
+                messages=[{"role": "user", "content": content}],
+                output_format=PictureAnalysis if image is not None else SpeechAnalysis,
                 output_config={"effort": self._effort},
                 thinking={"type": "adaptive"},
                 timeout=self._timeout_seconds,
@@ -333,52 +425,59 @@ class ClaudeAnalyzer:
             improved_version=parsed.improved_version,
             takeaways=parsed.takeaways,
             scores=scores,
-            overall_score=_overall_score(scores),
+            overall_score=_overall_score(scores, skip=("fluency",) if typed else ()),
+            not_mentioned=list(getattr(parsed, "not_mentioned", [])),
+            scene_vocabulary=list(getattr(parsed, "scene_vocabulary", [])),
             model=self._model,
             effort=self._effort,
             request_id=request_id,
-            usage=_usage_counts(response),
+            usage=usage_counts(response),
         )
 
     # --------------------------------------------------------------- errors
     def _to_friendly_error(self, exc: Exception) -> AnalysisError:
-        """Turn SDK/network exceptions into something worth showing a human."""
-        if isinstance(exc, AnalysisError):
-            return exc
+        return friendly_api_error(
+            exc,
+            "Claude API не ответил вовремя. Транскрипт сохранён - "
+            "попробуйте выполнить анализ ещё раз.",
+        )
 
-        import anthropic
 
-        if isinstance(exc, anthropic.AuthenticationError):
-            return AnalysisError(
-                "Claude отклонил API-ключ. Проверьте ANTHROPIC_API_KEY."
-            )
-        if isinstance(exc, anthropic.PermissionDeniedError):
-            return AnalysisError(
-                "У ключа ANTHROPIC_API_KEY нет прав на эту операцию/модель."
-            )
-        if isinstance(exc, anthropic.RateLimitError):
-            retry_after = _retry_after(exc)
-            suffix = (
-                f" Повторите попытку через {retry_after} с."
-                if retry_after
-                else " Повторите попытку позже."
-            )
-            return AnalysisError(f"Достигнут лимит запросов к Claude.{suffix}")
-        if isinstance(exc, anthropic.APITimeoutError):
-            return AnalysisError(
-                "Claude API не ответил вовремя. Транскрипт сохранён - "
-                "попробуйте выполнить анализ ещё раз."
-            )
-        if isinstance(exc, anthropic.APIConnectionError):
-            return AnalysisError(
-                "Не удалось связаться с Claude API. Проверьте подключение к "
-                "интернету и повторите попытку."
-            )
-        if isinstance(exc, anthropic.APIStatusError):
-            return AnalysisError(f"Ошибка Claude API (HTTP {exc.status_code}).")
+def friendly_api_error(exc: Exception, timeout_message: str) -> AnalysisError:
+    """Turn SDK/network exceptions into something worth showing a human.
 
-        logger.exception("Unexpected analysis failure")
-        return AnalysisError(f"Не удалось выполнить анализ: {exc}")
+    Shared by every Claude call in the app (analysis, exercise sets, grading);
+    only the timeout advice differs between them.
+    """
+    if isinstance(exc, AnalysisError):
+        return exc
+
+    import anthropic
+
+    if isinstance(exc, anthropic.AuthenticationError):
+        return AnalysisError("Claude отклонил API-ключ. Проверьте ANTHROPIC_API_KEY.")
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        return AnalysisError("У ключа ANTHROPIC_API_KEY нет прав на эту операцию/модель.")
+    if isinstance(exc, anthropic.RateLimitError):
+        retry_after = _retry_after(exc)
+        suffix = (
+            f" Повторите попытку через {retry_after} с."
+            if retry_after
+            else " Повторите попытку позже."
+        )
+        return AnalysisError(f"Достигнут лимит запросов к Claude.{suffix}")
+    if isinstance(exc, anthropic.APITimeoutError):
+        return AnalysisError(timeout_message)
+    if isinstance(exc, anthropic.APIConnectionError):
+        return AnalysisError(
+            "Не удалось связаться с Claude API. Проверьте подключение к "
+            "интернету и повторите попытку."
+        )
+    if isinstance(exc, anthropic.APIStatusError):
+        return AnalysisError(f"Ошибка Claude API (HTTP {exc.status_code}).")
+
+    logger.exception("Unexpected Claude API failure")
+    return AnalysisError(f"Не удалось выполнить запрос к Claude: {exc}")
 
 
 def _clamped_scores(scores: Optional[Scores]) -> Optional[Scores]:
@@ -396,15 +495,16 @@ def _clamped_scores(scores: Optional[Scores]) -> Optional[Scores]:
     return clamped
 
 
-def _overall_score(scores: Optional[Scores]) -> Optional[float]:
-    """Mean of the four skill scores, rounded to the nearest 0.5.
+def _overall_score(scores: Optional[Scores], skip: tuple = ()) -> Optional[float]:
+    """Mean of the skill scores, rounded to the nearest 0.5.
 
     Computed here rather than asked of the model so it always agrees with the
-    per-skill numbers shown next to it.
+    per-skill numbers shown next to it. `skip` leaves skills out - fluency
+    for a typed text, which has no delivery to judge.
     """
     if scores is None:
         return None
-    values = [getattr(scores, name).score for name in Scores.model_fields]
+    values = [getattr(scores, name).score for name in Scores.model_fields if name not in skip]
     # floor(x + 0.5) rather than round(): round() is banker's rounding, which
     # would turn 6.25 into 6.0 but 6.75 into 7.0.
     return math.floor(sum(values) / len(values) * 2 + 0.5) / 2
@@ -418,7 +518,7 @@ _USAGE_FIELDS: Final[tuple] = (
 )
 
 
-def _usage_counts(response: Any) -> Dict[str, int]:
+def usage_counts(response: Any) -> Dict[str, int]:
     """Token counts from response.usage; missing or null fields count as 0."""
     usage = getattr(response, "usage", None)
     counts: Dict[str, int] = {}

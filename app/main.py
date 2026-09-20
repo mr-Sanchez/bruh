@@ -54,10 +54,29 @@ def self_test() -> int:
 
         from app.transcriber import DeepgramTranscriber
 
+        # A word with its timings, as the spoken drills read it back.
         canned = {
             "metadata": {"request_id": "selftest"},
             "results": {
-                "channels": [{"alternatives": [{"transcript": "ok", "confidence": 1.0}]}]
+                "channels": [
+                    {
+                        "alternatives": [
+                            {
+                                "transcript": "ok",
+                                "confidence": 1.0,
+                                "words": [
+                                    {
+                                        "word": "ok",
+                                        "punctuated_word": "Ok.",
+                                        "start": 0.1,
+                                        "end": 0.5,
+                                        "confidence": 1.0,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
             },
         }
 
@@ -83,12 +102,19 @@ def self_test() -> int:
             ).transcribe(audio_path)
         assert result.transcript == "ok"
         logger.info("selftest: Deepgram SDK request path OK")
+
+        from app import speech_drills
+
+        words = speech_drills.response_words(result.raw_response)
+        assert speech_drills.speech_metrics(words, True)["words"] == 1
+        assert speech_drills.align_reading("Ok.", words)["score"] == 1.0
+        logger.info("selftest: spoken-drill measurements OK")
     except Exception:
         logger.exception("selftest: Deepgram SDK FAILED")
         ok = False
 
     try:
-        from app.analyzer import ClaudeAnalyzer, SpeechAnalysis
+        from app.analyzer import ClaudeAnalyzer, ImageInput, SpeechAnalysis
 
         class _FakeResponse:
             stop_reason = "end_turn"
@@ -103,13 +129,57 @@ def self_test() -> int:
         class _FakeClient:
             messages = _FakeMessages()
 
-        result = ClaudeAnalyzer(
-            "selftest-key", client_factory=lambda key: _FakeClient()
-        ).analyze("test transcript", config.default_profile(), 1.0)
+        analyzer = ClaudeAnalyzer("selftest-key", client_factory=lambda key: _FakeClient())
+        result = analyzer.analyze("test transcript", config.default_profile(), 1.0)
         assert result.summary == "ok"
-        logger.info("selftest: Claude analyzer request path OK")
+        # The picture description sends the image along; its schema is a superset.
+        result = analyzer.analyze(
+            "test transcript",
+            config.default_profile(),
+            image=ImageInput(data=b"\xff\xd8\xff", media_type="image/jpeg"),
+            typed=True,
+        )
+        assert result.summary == "ok"
+        logger.info("selftest: Claude analyzer request paths OK (monologue, picture)")
     except Exception:
         logger.exception("selftest: Claude analyzer FAILED")
+        ok = False
+
+    try:
+        from app.exercise_sets import (
+            ExerciseSetGenerator,
+            GeneratedSet,
+            Grading,
+            TranslateExercise,
+            TranslationAnswer,
+        )
+
+        class _FakeSetResponse:
+            stop_reason = "end_turn"
+            _request_id = "selftest"
+
+            def __init__(self, parsed: object) -> None:
+                self.parsed_output = parsed
+
+        class _FakeSetMessages:
+            def parse(self, **kwargs: object) -> _FakeSetResponse:
+                logger.info("selftest: exercise set request built (model=%s)", kwargs.get("model"))
+                if kwargs.get("output_format") is Grading:
+                    return _FakeSetResponse(Grading(verdicts=[]))
+                translation = TranslateExercise(russian="тест", reference="test", focus="x")
+                return _FakeSetResponse(GeneratedSet(intro="ok", translations=[translation]))
+
+        class _FakeSetClient:
+            messages = _FakeSetMessages()
+
+        generator = ExerciseSetGenerator("selftest-key", client_factory=lambda key: _FakeSetClient())
+        topic = {"key": "articles", "label": "Articles", "description": ""}
+        assert len(generator.generate(topic, []).exercises) == 1
+        answer = TranslationAnswer("ex1", "тест", "test", "x", "a test")
+        assert generator.grade(topic, [answer]).verdicts == {}
+        logger.info("selftest: exercise set request paths OK (generate, grade)")
+    except Exception:
+        logger.exception("selftest: exercise sets FAILED")
         ok = False
 
     try:
