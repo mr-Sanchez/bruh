@@ -15,6 +15,9 @@ later switch from flat files to SQLite stays local to it. The files:
 
 Spoken drills (talk, shadowing) are ordinary recordings; their results are
 derived on read from deepgram_response.json and logged as topic attempts.
+Dictation is the exception: it keeps its own files (app.dictation_store) and
+writes no attempts at all, but its finished sentences still feed the daily
+workout, the day streak and the history shown here.
 
 The rules themselves (item identity, Leitner, topic mastery) live in
 app.learner_model as pure functions.
@@ -29,7 +32,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app import config, learner_model, progress_store, speech_drills, utils
+from app import config, dictation_store, learner_model, progress_store, speech_drills, utils
 
 logger = logging.getLogger(__name__)
 
@@ -699,6 +702,29 @@ def _speech_step(today: dt.date, sessions: List[utils.Session]) -> Optional[Dict
     }
 
 
+def _dictation_step(now: dt.datetime) -> Dict[str, Any]:
+    """The «Сегодня» dictation step (mandatory, decided 2026-09-20).
+
+    Done once DICTATION_DAILY_SENTENCES sentences have been dictated today,
+    across any lesson. With no lesson imported yet the step is "empty": it
+    invites an import instead of holding the whole workout back.
+    """
+    done = dictation_store.done_today(now)
+    target = config.DICTATION_DAILY_SENTENCES
+    lesson = dictation_store.next_lesson(now)
+    step: Dict[str, Any] = {
+        "kind": "dictation",
+        "status": "done" if done >= target else "todo",
+        "done_today": done,
+        "target": target,
+        "lesson": lesson,
+        "minutes": 0 if done >= target else round(config.WORKOUT_MINUTES_DICTATION),
+    }
+    if lesson is None and not done:
+        step.update({"status": "empty", "minutes": 0})
+    return step
+
+
 # ------------------------------------------------------------ daily workout
 def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
     """The «Сегодня» workout, assembled by code (no LLM): cards, then a topic
@@ -783,18 +809,22 @@ def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
         "minutes": 0 if live_status == "done" else round(config.WORKOUT_MINUTES_MONOLOGUE),
     }
 
-    # 4. Optional and paid: an AI exercise set on the main topic.
+    # 4. Listening dictation: a few sentences of a YouTube lesson ($0).
+    dictation_step = _dictation_step(now)
+    # 5. Optional and paid: an AI exercise set on the main topic.
     set_step = _set_step(snap["mastery"], attempts_today)
-    # 5. Optional, Deepgram only: a spoken warm-up.
+    # 6. Optional, Deepgram only: a spoken warm-up.
     speech_step = _speech_step(today, sessions)
 
     focus = next((row for row in snap["mastery"] if row["priority"] > 0), None)
-    steps = [cards_step] + ([drill_step] if drill_step else []) + [live_step]
+    steps = [cards_step] + ([drill_step] if drill_step else []) + [live_step, dictation_step]
     steps += [set_step] if set_step else []
     steps += [speech_step] if speech_step else []
 
     active_days = {dt.datetime.fromisoformat(a["ts"]).date() for a in snap["attempts"]}
     active_days |= {s.started_at.date() for s in recorded}
+    # A dictated sentence is practice too: it keeps the streak alive.
+    active_days |= dictation_store.active_days()
     return {
         "today": today.isoformat(),
         "steps": steps,
@@ -812,14 +842,28 @@ def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
 
 
 def activity_history(days: int = config.ACTIVITY_HISTORY_DAYS) -> List[Dict[str, Any]]:
-    """Exercise results per day, newest first, with topic labels."""
+    """Exercise results per day, newest first, with topic labels.
+
+    Dictation is not in the attempts log (it trains listening, not one of the
+    taxonomy's topics), so its per-day counts are merged in here - including
+    on days when dictation was the only thing practised.
+    """
     history = learner_model.daily_activity(load_attempts(), days)
+    by_day = {entry["date"]: entry for entry in history}
+    for day, counts in dictation_store.daily_counts().items():
+        entry = by_day.get(day)
+        if entry is None:
+            entry = {"date": day, "cards": 0, "cards_correct": 0, "drills": []}
+            by_day[day] = entry
+            history.append(entry)
+        entry["dictation"] = counts
     for entry in history:
         for drill in entry["drills"]:
             drill["label"] = (
                 progress_store.TOPIC_TAXONOMY.get(drill["topic"], {}).get("label", drill["topic"])
             )
-    return history
+    history.sort(key=lambda entry: entry["date"], reverse=True)
+    return history[:days]
 
 
 # -------------------------------------------------------------------- usage

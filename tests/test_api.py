@@ -36,6 +36,7 @@ from app.exercise_sets import (  # noqa: E402
 )
 from app.server import app as fastapi_app  # noqa: E402
 from app.transcriber import TranscriptionResult  # noqa: E402
+from app.youtube import FetchedVideo, NoSubtitlesError  # noqa: E402
 from tests.test_speech_drills import deepgram_payload, timed_words  # noqa: E402
 
 
@@ -549,17 +550,21 @@ class ApiTests(unittest.TestCase):
 
     def test_today_is_empty_before_any_recording(self) -> None:
         body = self.client.get("/api/learner/today").json()
-        self.assertEqual([s["kind"] for s in body["steps"]], ["cards", "monologue"])
+        self.assertEqual([s["kind"] for s in body["steps"]], ["cards", "monologue", "dictation"])
         self.assertEqual(body["steps"][0]["status"], "empty")
         self.assertEqual(body["steps"][1]["status"], "todo")
         self.assertTrue(body["steps"][1]["prompt"]["question"])
+        # No lesson imported yet: the dictation step invites one instead of
+        # holding the whole workout back.
+        self.assertEqual(body["steps"][2]["status"], "empty")
+        self.assertIsNone(body["steps"][2]["lesson"])
         self.assertEqual(body["streak_days"], 0)
         self.assertIsNone(body["focus_topic"])
 
     def test_today_workout_tracks_each_step(self) -> None:
         session_id = self._analyzed_session()
         body = self.client.get("/api/learner/today").json()
-        cards, drill, live = body["steps"]
+        cards, drill, live, dictation_step = body["steps"]
         self.assertEqual((cards["status"], cards["queue_total"]), ("todo", 1))
         self.assertEqual((drill["kind"], drill["status"]), ("cloze", "todo"))
         self.assertEqual(drill["topic"]["key"], "articles")
@@ -577,7 +582,8 @@ class ApiTests(unittest.TestCase):
             json={"topic": "articles", "exercise": "cloze", "score": 1.0, "session_id": session_id},
         )
         body = self.client.get("/api/learner/today").json()
-        self.assertEqual([s["status"] for s in body["steps"]], ["done", "done", "done"])
+        self.assertEqual([s["status"] for s in body["steps"]], ["done", "done", "done", "empty"])
+        self.assertEqual(dictation_step["kind"], "dictation")
         self.assertEqual(body["minutes_left"], 0)
 
         history = self.client.get("/api/learner/history").json()["days"]
@@ -585,11 +591,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(history[0]["drills"][0]["label"], "Артикли (a / an / the)")
 
     def test_a_picture_description_fills_the_live_step(self) -> None:
+        def live_step() -> Dict:
+            steps = self.client.get("/api/learner/today").json()["steps"]
+            return next(step for step in steps if step["kind"] == "monologue")
+
         upload = self._upload_picture(text="There is a cat.")
-        live = self.client.get("/api/learner/today").json()["steps"][-1]
+        live = live_step()
         self.assertEqual((live["status"], live["activity"]), ("analyze", "picture"))
         self.client.post(f"/api/sessions/{upload['session_id']}/analyze")
-        live = self.client.get("/api/learner/today").json()["steps"][-1]
+        live = live_step()
         self.assertEqual((live["status"], live["session_id"]), ("done", upload["session_id"]))
 
     def test_static_files_are_revalidated_after_an_update(self) -> None:
@@ -910,8 +920,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["minutes_left"], 3)  # the cloze only: the set is optional
 
         # Without a key the step only shows for a set that is already paid for.
-        last = self.client.get("/api/learner/today").json()["steps"][-1]
-        self.assertEqual(last["kind"], "monologue")
+        steps = self.client.get("/api/learner/today").json()["steps"]
+        self.assertNotIn("ai_set", [step["kind"] for step in steps])
         set_id = self._create_set()["set"]["id"]
         step = self.client.get("/api/learner/today").json()["steps"][-1]
         self.assertEqual((step["set_id"], step["cost_usd"]), (set_id, 0.0))
@@ -919,6 +929,185 @@ class ApiTests(unittest.TestCase):
         self._submit(set_id, self.GOOD_ANSWERS)
         step = self.client.get("/api/learner/today").json()["steps"][-1]
         self.assertEqual((step["status"], step["score"]), ("done", 1.0))
+
+
+class FakeFetcher:
+    """Stands in for the YouTube import: writes an audio file, returns captions."""
+
+    VTT = (
+        "WEBVTT\n\n"
+        "00:00:01.000 --> 00:00:05.000\n"
+        "Hello everyone, and welcome back to the channel.\n\n"
+        "00:00:05.100 --> 00:00:09.000\n"
+        "Today we are going to talk about code review.\n"
+    )
+
+    def __init__(self, error: Optional[Exception] = None) -> None:
+        self.error = error
+        self.calls: List = []
+
+    def fetch(self, url: str, target_dir: Path, languages) -> FetchedVideo:
+        self.calls.append((url, tuple(languages)))
+        if self.error is not None:
+            raise self.error
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "audio.m4a").write_bytes(b"fake-audio-bytes")
+        return FetchedVideo(
+            video_id="dQw4w9WgXcQ",
+            url=url,
+            title="Deploying on Fridays",
+            uploader="Some Channel",
+            duration_seconds=300.0,
+            audio_filename="audio.m4a",
+            subtitles=self.VTT,
+            subtitle_language="en",
+            subtitle_kind="manual",
+        )
+
+
+class DictationApiTests(unittest.TestCase):
+    """The dictation routes, with the YouTube import replaced by a fake."""
+
+    URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base_dir_patch = patch.object(config, "base_dir", return_value=Path(self._tmp.name))
+        base_dir_patch.start()
+        self.addCleanup(base_dir_patch.stop)
+        self.fetcher = FakeFetcher()
+        fastapi_app.dependency_overrides[api.get_fetcher_factory] = lambda: (lambda: self.fetcher)
+        self.addCleanup(fastapi_app.dependency_overrides.clear)
+        self.client = TestClient(fastapi_app)
+
+    def _import(self) -> Dict:
+        response = self.client.post("/api/dictation/lessons", json={"url": self.URL})
+        self.assertEqual(response.status_code, 202, response.text)
+        return response.json()
+
+    def test_importing_a_video_builds_a_lesson_from_its_subtitles(self) -> None:
+        body = self._import()
+        self.assertEqual(body["lesson_id"], "dQw4w9WgXcQ")
+        self.assertEqual(self.fetcher.calls[0][1], ("en",))
+
+        lesson = self.client.get("/api/dictation/lessons/dQw4w9WgXcQ").json()
+        self.assertEqual(lesson["status"], "ready")
+        self.assertEqual(lesson["title"], "Deploying on Fridays")
+        self.assertEqual(len(lesson["sentences"]), 2)
+        self.assertEqual(lesson["sentences"][0]["tokens"][0]["text"], "Hello")
+        # The audio is served as a file, so the browser can seek in it.
+        audio = self.client.get("/api/dictation/lessons/dQw4w9WgXcQ/audio")
+        self.assertEqual(audio.status_code, 200)
+        self.assertEqual(audio.content, b"fake-audio-bytes")
+
+    def test_an_already_imported_video_is_not_downloaded_twice(self) -> None:
+        self._import()
+        self._import()
+        self.assertEqual(len(self.fetcher.calls), 1)
+
+    def test_a_link_that_is_not_youtube_is_refused(self) -> None:
+        response = self.client.post("/api/dictation/lessons", json={"url": "https://vimeo.com/1"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.fetcher.calls, [])
+
+    def test_a_video_without_subtitles_leaves_the_lesson_in_error(self) -> None:
+        self.fetcher.error = NoSubtitlesError("У этого видео нет субтитров.")
+        self._import()
+
+        lesson = self.client.get("/api/dictation/lessons/dQw4w9WgXcQ").json()
+
+        self.assertEqual(lesson["status"], "error")
+        self.assertIn("субтитров", lesson["error_message"])
+        response = self.client.get("/api/dictation/lessons/dQw4w9WgXcQ/audio")
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_dictated_sentence_is_graded_on_the_server(self) -> None:
+        self._import()
+
+        response = self.client.post(
+            "/api/dictation/lessons/dQw4w9WgXcQ/results",
+            json={
+                "sentence": 0,
+                # "channel" is misspelt, "welcome" was hinted, the rest is right.
+                "answers": ["hello", "everyone", "and", "welcome", "back", "to", "the", "chanel"],
+                "hints": [3],
+                "error_chars": 2,
+                "seconds": 41.5,
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.text)
+        body = response.json()
+        self.assertEqual(body["result"]["incorrect_words"], ["channel"])
+        self.assertEqual(body["result"]["hint_words"], ["welcome"])
+        self.assertEqual(body["result"]["error_chars"], 2)
+        self.assertFalse(body["result"]["completed"])
+        self.assertEqual(body["progress"]["started"], 1)
+        self.assertEqual(body["progress"]["done"], 0)
+
+        stats = self.client.get("/api/dictation/stats").json()
+        self.assertEqual(stats["lessons"], 1)
+        self.assertEqual(stats["hints"], 1)
+        self.assertEqual(stats["tricky_words"], [])  # once is not yet "tricky"
+
+    def test_an_unknown_sentence_or_lesson_is_a_404(self) -> None:
+        self._import()
+        response = self.client.post(
+            "/api/dictation/lessons/dQw4w9WgXcQ/results", json={"sentence": 99, "answers": []}
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.client.get("/api/dictation/lessons/aaaaaaaaaaa").status_code, 404)
+
+    def test_the_lesson_id_is_guarded_like_a_session_id(self) -> None:
+        for bad_id in ("..", "a/b", "%2e%2e", "a b"):
+            response = self.client.get(f"/api/dictation/lessons/{bad_id}")
+            self.assertIn(response.status_code, (400, 404), bad_id)
+
+    def test_dictation_fills_the_daily_step_and_the_history(self) -> None:
+        self._import()
+        step = next(
+            s
+            for s in self.client.get("/api/learner/today").json()["steps"]
+            if s["kind"] == "dictation"
+        )
+        self.assertEqual(step["status"], "todo")
+        self.assertEqual(step["target"], config.DICTATION_DAILY_SENTENCES)
+        self.assertEqual(step["lesson"]["id"], "dQw4w9WgXcQ")
+
+        with patch.object(config, "DICTATION_DAILY_SENTENCES", 1):
+            self.client.post(
+                "/api/dictation/lessons/dQw4w9WgXcQ/results",
+                json={
+                    "sentence": 0,
+                    "answers": [
+                        "Hello",
+                        "everyone",
+                        "and",
+                        "welcome",
+                        "back",
+                        "to",
+                        "the",
+                        "channel",
+                    ],
+                },
+            )
+            body = self.client.get("/api/learner/today").json()
+
+        step = next(s for s in body["steps"] if s["kind"] == "dictation")
+        self.assertEqual((step["status"], step["done_today"]), ("done", 1))
+        self.assertEqual(body["streak_days"], 1)  # a dictated sentence counts
+
+        day = self.client.get("/api/learner/history").json()["days"][0]
+        self.assertEqual(day["dictation"]["sentences"], 1)
+
+    def test_deleting_a_lesson_removes_it(self) -> None:
+        self._import()
+
+        deleted = self.client.delete("/api/dictation/lessons/dQw4w9WgXcQ").json()
+
+        self.assertEqual(deleted["deleted"], "dQw4w9WgXcQ")
+        self.assertEqual(self.client.get("/api/dictation/lessons").json()["lessons"], [])
 
 
 class SessionDirectoryGuardTests(unittest.TestCase):

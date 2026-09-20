@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field
 
 from app import (
     config,
+    dictation,
+    dictation_store,
     exercise_sets,
     learner_model,
     learner_store,
@@ -46,6 +48,13 @@ from app.analyzer import (
 from app.exercise_sets import ExerciseSetGenerator, TranslationAnswer
 from app.transcriber import DeepgramTranscriber, TranscriptionError
 from app.utils import Session
+from app.youtube import (
+    NoSubtitlesError,
+    YouTubeError,
+    YouTubeFetcher,
+    create_fetcher,
+    video_id_from_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +63,7 @@ router = APIRouter(prefix="/api")
 TranscriberFactory = Callable[[config.LanguageProfile], DeepgramTranscriber]
 AnalyzerFactory = Callable[[], ClaudeAnalyzer]
 GeneratorFactory = Callable[[], ExerciseSetGenerator]
+FetcherFactory = Callable[[], YouTubeFetcher]
 
 
 # ------------------------------------------------------------- dependencies
@@ -76,6 +86,15 @@ def get_analyzer_factory() -> AnalyzerFactory:
 def get_generator_factory() -> GeneratorFactory:
     def factory() -> ExerciseSetGenerator:
         return ExerciseSetGenerator(config.get_anthropic_api_key())
+
+    return factory
+
+
+def get_fetcher_factory() -> FetcherFactory:
+    """The YouTube import of a dictation lesson (yt-dlp; no API key needed)."""
+
+    def factory() -> YouTubeFetcher:
+        return create_fetcher()
 
     return factory
 
@@ -627,6 +646,158 @@ def get_talk_series() -> Dict[str, Any]:
         "series": learner_store.talk_series(),
         "prompt_index": speech_drills.talk_prompt_index(today),
     }
+
+
+# -------------------------------------------------------------- /dictation
+# Listening dictation (Stage 7): a YouTube video becomes a lesson - its audio
+# plus the sentences of its own subtitle track, typed word by word. Free by
+# construction: nothing here calls Deepgram or Claude, and a video without
+# usable subtitles is refused rather than transcribed (decided 2026-09-20).
+_LESSON_ID_PATTERN = r"^[A-Za-z0-9_-]{6,20}$"
+
+
+class ImportLessonRequest(BaseModel):
+    url: str = Field(min_length=6, max_length=500)
+    language: str = Field(default=config.DEFAULT_LANGUAGE_KEY, max_length=10)
+
+
+class SentenceResultRequest(BaseModel):
+    """One dictated sentence as the browser finished it.
+
+    The answers are graded again here, so what is stored never depends on the
+    client; `error_chars` is taken as given because a mistyped character can
+    only be seen while it is typed.
+    """
+
+    sentence: int = Field(ge=0, le=10_000)
+    answers: List[str] = Field(default_factory=list, max_length=200)
+    hints: List[int] = Field(default_factory=list, max_length=200)
+    error_chars: int = Field(default=0, ge=0, le=100_000)
+    seconds: float = Field(default=0.0, ge=0.0, le=36_000.0)
+
+
+def _lesson_or_404(lesson_id: str) -> Dict[str, Any]:
+    # The id is a path segment and becomes a directory name: only YouTube's
+    # own id shape is accepted (see the session id guard above).
+    if not re.match(_LESSON_ID_PATTERN, lesson_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid lesson id.")
+    lesson = dictation_store.load_lesson(lesson_id)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="Unknown lesson.")
+    return lesson
+
+
+def _import_lesson(
+    lesson: Dict[str, Any], url: str, languages: List[str], fetcher_factory: FetcherFactory
+) -> None:
+    """Runs in a background thread; lesson.json is the result, like a session."""
+    try:
+        fetched = fetcher_factory().fetch(url, dictation_store.lesson_dir(lesson["id"]), languages)
+        sentences = dictation.lesson_sentences(fetched.subtitles)
+        if not sentences:
+            raise NoSubtitlesError("Субтитры пустые — по этому видео не собрать диктант.")
+        dictation_store.finish_import(lesson, fetched, sentences)
+        logger.info("Dictation lesson %s ready: %d sentences", lesson["id"], len(sentences))
+    except YouTubeError as exc:
+        logger.error("Dictation import failed for %s: %s", lesson["id"], exc)
+        dictation_store.fail_import(lesson, str(exc))
+    except Exception as exc:  # pragma: no cover - unexpected
+        logger.exception("Unexpected error importing %s", lesson["id"])
+        dictation_store.fail_import(lesson, f"Непредвиденная ошибка: {exc}")
+
+
+@router.post("/dictation/lessons", status_code=202)
+def import_lesson(
+    body: ImportLessonRequest,
+    background_tasks: BackgroundTasks,
+    fetcher_factory: FetcherFactory = Depends(get_fetcher_factory),
+) -> Dict[str, Any]:
+    """Start importing a YouTube video; poll the lesson until it is ready."""
+    try:
+        video_id = video_id_from_url(body.url)
+    except YouTubeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    profile = config.profile_by_key(body.language)
+    languages = list(
+        config.DICTATION_SUBTITLE_LANGUAGES.get(profile.key)
+        or config.DICTATION_SUBTITLE_LANGUAGES[config.DEFAULT_LANGUAGE_KEY]
+    )
+    existing = dictation_store.load_lesson(video_id)
+    if existing is not None and existing.get("status") == config.LESSON_STATUS_READY:
+        # Already imported: hand it back instead of downloading it twice.
+        return {"lesson_id": video_id, "status": existing["status"]}
+    try:
+        lesson = dictation_store.start_import(video_id, body.url, profile.key)
+    except OSError as exc:
+        logger.exception("Could not create the lesson directory")
+        raise HTTPException(status_code=500, detail=f"Could not create the lesson folder: {exc}")
+    background_tasks.add_task(_import_lesson, lesson, body.url, languages, fetcher_factory)
+    return {"lesson_id": lesson["id"], "status": lesson["status"]}
+
+
+@router.get("/dictation/lessons")
+def list_lessons() -> Dict[str, Any]:
+    """Every lesson with its progress, newest import first."""
+    return {
+        "lessons": [dictation_store.lesson_summary(l) for l in dictation_store.list_lessons()],
+        "max_minutes": config.DICTATION_MAX_SECONDS // 60,
+        "daily_target": config.DICTATION_DAILY_SENTENCES,
+        "done_today": dictation_store.done_today(),
+    }
+
+
+@router.get("/dictation/lessons/{lesson_id}")
+def get_lesson(lesson_id: str) -> Dict[str, Any]:
+    """The lesson page: every sentence with its tokens, timings and last result."""
+    return dictation_store.lesson_payload(_lesson_or_404(lesson_id))
+
+
+@router.get("/dictation/lessons/{lesson_id}/audio")
+def get_lesson_audio(lesson_id: str) -> FileResponse:
+    lesson = _lesson_or_404(lesson_id)
+    path = dictation_store.audio_path(lesson)
+    if path is None:
+        raise HTTPException(status_code=404, detail="No audio for this lesson.")
+    media_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    # FileResponse answers Range requests, which is what seeking to a
+    # sentence needs.
+    return FileResponse(path, media_type=media_type)
+
+
+@router.post("/dictation/lessons/{lesson_id}/results", status_code=201)
+def post_lesson_result(lesson_id: str, body: SentenceResultRequest) -> Dict[str, Any]:
+    """Log one dictated sentence (append-only) and hand back its grading."""
+    lesson = _lesson_or_404(lesson_id)
+    sentences = lesson.get("sentences") or []
+    if body.sentence >= len(sentences):
+        raise HTTPException(status_code=404, detail="Unknown sentence.")
+    sentence = sentences[body.sentence]
+    graded = dictation.grade_sentence(sentence["text"], body.answers, body.hints)
+    record = dictation_store.append_result(
+        lesson_id,
+        {
+            "sentence": body.sentence,
+            "error_chars": body.error_chars,
+            "seconds": round(body.seconds, 1),
+            **graded,
+        },
+    )
+    results = dictation_store.lesson_results(lesson_id)
+    return {"result": record, "progress": dictation.lesson_progress(len(sentences), results)}
+
+
+@router.delete("/dictation/lessons/{lesson_id}")
+def delete_lesson(lesson_id: str) -> Dict[str, Any]:
+    """Delete a lesson with its audio and its results - always a deliberate click."""
+    lesson = _lesson_or_404(lesson_id)
+    dictation_store.delete_lesson(lesson["id"])
+    return {"deleted": lesson["id"]}
+
+
+@router.get("/dictation/stats")
+def get_dictation_stats() -> Dict[str, Any]:
+    """Cross-lesson numbers and the «сложные слова» list for «Прогресс»."""
+    return dictation_store.stats()
 
 
 # ------------------------------------------------------ /practice/sets

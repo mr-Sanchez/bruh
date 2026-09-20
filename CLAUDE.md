@@ -3,7 +3,8 @@
 Voice Practice Coach — a local-only web app for practising spoken English/Russian.
 Record in the browser (a monologue, or a description of a picture — spoken or typed) →
 verbatim Deepgram transcript → on-demand Claude feedback in Russian, tagged by topic and
-aggregated across sessions.
+aggregated across sessions. Listening is trained the other way round: a YouTube video is
+imported as a dictation lesson and typed back word by word.
 
 Python FastAPI backend + plain HTML/CSS/JS frontend (no build step, no framework).
 Everything runs on the user's PC; state lives in flat files, there is no database.
@@ -36,6 +37,12 @@ app/exercise_sets.py  Claude layer    — AI exercise sets: generation (Sonnet 5
                       of translations (Haiku 4.5), one call each
 app/speech_drills.py  pure speech measurements from Deepgram word timings: pace, fillers,
                       pauses, shadowing alignment (no I/O, no Claude)
+app/dictation.py      pure dictation rules: WebVTT parsing, sentence building, word
+                      checking, tricky words (no I/O, no Claude, no Deepgram)
+app/youtube.py        the only place that talks to YouTube (yt-dlp, imported lazily):
+                      the audio and subtitle track of one video
+app/dictation_store.py
+                      the ONLY place dictation lessons are read/written
 app/progress_store.py cross-session topic aggregation + score history → data/progress.json
 app/learner_model.py  pure learner-model rules: item bank, Leitner state, topic mastery (no I/O)
 app/learner_store.py  the ONLY place learner-model files are read/written; usage/cost log
@@ -46,14 +53,16 @@ app/static/           frontend: index.html, css/app.css, js/api.js, js/app.js (h
                       js/charts.js (SVG sparklines, score charts, stat tiles),
                       js/recorder.js (MediaRecorder + level meter, shared by every
                       spoken activity),
-                      js/views/{today,practice,record,speech,history,session,progress}.js
-                      (record.js also registers Views.picture: the recorder in picture mode;
-                      speech.js registers Views.talk and Views.shadowing)
+                      js/views/{today,practice,record,speech,dictation,history,session,
+                      progress}.js (record.js also registers Views.picture: the recorder in
+                      picture mode; speech.js registers Views.talk and Views.shadowing;
+                      dictation.js is both the lesson list and the typing workspace)
 ```
 
 Layering rule: `api.py` orchestrates; `transcriber.py` / `analyzer.py` / `progress_store.py` /
-`learner_*.py` stay framework-agnostic and are constructed through factory dependencies
-(`get_transcriber_factory`, `get_analyzer_factory`) so tests can override them.
+`learner_*.py` / `youtube.py` stay framework-agnostic and are constructed through factory
+dependencies (`get_transcriber_factory`, `get_analyzer_factory`, `get_fetcher_factory`) so
+tests can override them.
 
 ### Data on disk (created at runtime, all gitignored)
 
@@ -70,6 +79,11 @@ data/attempts.jsonl                 append-only, AUTHORITATIVE — every exercis
 data/usage.jsonl                    append-only — tokens/minutes + estimated cost per paid call
 data/practice/<set-id>.json         AI exercise sets + every run and Claude verdict; paid for,
                                     NOT rebuildable; wrong answers are a 2nd source of bank items
+data/dictation/<video-id>/          lesson.json (the video + its sentences with timings),
+                                    audio.<ext> (as YouTube served it, never re-encoded),
+                                    subtitles.vtt (the caption track, verbatim),
+                                    results.jsonl (append-only, AUTHORITATIVE — every
+                                    dictated sentence)
 logs/app.log                        rotating, 1 MB × 4
 ```
 
@@ -92,6 +106,14 @@ Spoken drills («60 секунд» `#/talk`, shadowing `#/shadowing`) post to th
 `source_session_id` + `passage`), stored as `session.json`'s `drill`. They are measured, not
 analysed: after transcription the background task logs one topic attempt on
 `filler_words_fluency` (`speech_drills` computes it), and `/analyze` refuses them.
+
+A dictation lesson (`#/dictation`) is its own flow: `POST /api/dictation/lessons` with a
+YouTube link starts a background import (yt-dlp: audio + subtitle track), and the frontend
+polls `GET /api/dictation/lessons/<id>` until `ready`/`error`. The sentences come from the
+caption track (`dictation.lesson_sentences`); the browser plays one sentence's window, the
+learner types it word by word, and every finished (or abandoned) sentence is posted to
+`.../results`, where the answers are graded **again** server-side — so the stored result
+never depends on the client. Nothing in this flow calls Deepgram or Claude.
 
 A picture description (`#/picture`) uses the same route with `kind=picture` + an `image`
 (downscaled to ≤ 1000 px JPEG in the browser; the server sniffs the real type). Instead of
@@ -131,6 +153,16 @@ usage as `picture_analysis`.
 * **Spoken drills never call Claude.** Their whole result comes from Deepgram's word
   timings (`speech_drills.py`); only the first round of a «60 секунд» series is logged as
   an attempt, and a talk without filler detection (any language but English) is not scored.
+* **A dictation's reference text is the video's own subtitles.** Manual captions first,
+  YouTube's automatic ones otherwise; a video with neither is refused (decided 2026-09-20)
+  — the app never pays Deepgram to invent a reference. Automatic captions count only in
+  the video's own language, never as one of YouTube's machine translations. The audio is
+  stored as served (no FFmpeg, no transcoding) and a sentence is shown exactly as the
+  caption track spells it.
+* **Dictation results stay out of the learner model.** Their only home is the lesson's
+  `results.jsonl`: mishearing a word is not one of `TOPIC_TAXONOMY`'s speaking mistakes,
+  so nothing is written to `attempts.jsonl` or the item bank. They surface as their own
+  «сложные слова» list, and they do count for the day streak and the daily workout.
 * **`TOPIC_TAXONOMY` is a closed set.** It drives the Claude schema (`Literal[TopicKey]`),
   the prompt text and `progress.json` at once — changing it is a coordinated migration
   and needs a `schema_version` bump.
@@ -138,7 +170,8 @@ usage as `picture_analysis`.
 ## Conventions
 
 * Python: `from __future__ import annotations`, full type hints, `Final` constants,
-  module docstrings that explain *why*, 100-char lines, stdlib + the 6 pinned deps only.
+  module docstrings that explain *why*, 100-char lines, stdlib + the 7 pinned deps only
+  (`yt-dlp`, the dictation one, is imported lazily like the SDKs).
 * Heavy SDK imports (`anthropic`, `deepgram`) are lazy, inside factories, to keep startup fast.
 * Errors surface as typed exceptions (`TranscriptionError`, `AnalysisError` and subclasses)
   carrying a message meant for a human; `api.py` maps them to HTTP status codes
@@ -166,6 +199,9 @@ Everything is offline: no microphone, no browser, no network, no real keys.
 * `tests/test_speech_drills.py` — pace/filler/pause metrics, passage splitting, reading
   alignment (its `timed_words` / `deepgram_payload` helpers build word-level responses for
   the API tests too).
+* `tests/test_dictation.py` — subtitle parsing (including the rolling repetition of
+  automatic captions), sentence building, grading, and the fetcher through a fake yt-dlp.
+* `tests/test_dictation_store.py` — lesson files, the append-only results log, statistics.
 
 Inject fakes through `client_factory` (library layer) or `dependency_overrides` (routes).
 Never add a test that touches the network. Keep `--selftest` in sync when a request path changes.
@@ -180,7 +216,8 @@ per exercise; 7–10 new cards a day (`/api/learner/queue`). Stage 1 (learner mo
 `/api/learner/*`, `/api/usage`), Stage 2 (free drills: cards, cloze), Stage 3 (the
 «Сегодня» home screen, `/api/learner/today`, tabs Сегодня · Занятия · История · Прогресс)
 Stage 4 (picture description, voice or text), Stage 5 (AI exercise sets,
-`/api/practice/sets`) and Stage 6 (spoken drills, `/api/speech/*`) are done; the next
-candidates live under «Later» in `progress.md` (YouTube dictation is explicitly deferred).
+`/api/practice/sets`), Stage 6 (spoken drills, `/api/speech/*`) and Stage 7 (YouTube
+dictation, `/api/dictation/*`) are done; the next candidates live under «Later» in
+`progress.md`.
 PyInstaller packaging is deferred (a persistent server doesn't fit a onefile build), but
 `config.base_dir()` still handles a frozen build.

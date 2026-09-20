@@ -1,5 +1,6 @@
 // History view: every activity, newest first - recordings (linking into the
-// session view) and exercise results per day from the attempts log.
+// session view), exercise results per day from the attempts log, and the
+// dictation counts, which live in their own lesson files.
 window.Views = window.Views || {};
 
 Views.history = (() => {
@@ -62,6 +63,14 @@ Views.history = (() => {
       const name = DRILL_NAMES[drill.exercise] || drill.exercise;
       parts.push(`${name} · ${escapeHtml(drill.label)}: ${Math.round(drill.score * 100)}%`);
     });
+    if (day.dictation && day.dictation.sentences) {
+      const accuracy = day.dictation.accuracy;
+      parts.push(
+        `диктант: ${day.dictation.sentences} ${sentencesWord(day.dictation.sentences)}${
+          accuracy == null ? "" : ` · ${Math.round(accuracy * 100)}% слов верно`
+        }`
+      );
+    }
     return `
       <li class="history-day">
         <span>${escapeHtml(day.date)}</span>

@@ -93,6 +93,14 @@ grants microphone access on a proper server origin.
 5. Visit **История** (History) to revisit any past session, and **Прогресс**
    (Progress) to see which topics keep coming up across all your sessions.
 
+Listening is practised the other way round, on the **Диктант** activity
+(«Занятия» → Диктант): paste a YouTube link, and the video is imported as a
+lesson — its audio plus the sentences of its own subtitle track. You then type
+each sentence word by word while the player repeats it (Enter listens again,
+Space moves to the next word, Tab reveals the current one). This activity is
+free: it needs neither Deepgram nor Claude, only `yt-dlp`, and a video without
+usable subtitles is refused rather than transcribed.
+
 ### 1.6 What's saved on disk
 
 ```
@@ -104,6 +112,11 @@ recordings/2026-09-13_18-40-05/
     analysis.json            (Claude's structured feedback, once you Analyze)
 data/
     progress.json            (aggregated topic frequency across all sessions)
+data/dictation/<video id>/
+    lesson.json              (the video and its sentences, with timings)
+    audio.m4a                (the audio exactly as YouTube served it)
+    subtitles.vtt            (the caption track the sentences came from)
+    results.jsonl            (every dictated sentence — append-only)
 ```
 
 Everything after the `---` in `transcript.txt` is exactly the string Deepgram
@@ -228,17 +241,30 @@ app/
     transcriber.py       Deepgram API layer (mockable, no web-framework knowledge)
     analyzer.py          Claude API layer: structured, topic-tagged feedback
     progress_store.py    cross-session topic aggregation (data/progress.json)
+    exercise_sets.py     Claude layer: AI exercise sets (generation + grading)
+    speech_drills.py     spoken-drill measurements from Deepgram word timings
+    dictation.py         dictation rules: subtitles -> sentences, word checking
+    youtube.py           the YouTube import (yt-dlp), audio + subtitle track
+    dictation_store.py   dictation lessons on disk (data/dictation/)
+    learner_model.py     item bank, Leitner state, topic mastery (pure rules)
+    learner_store.py     the learner model on disk (bank, attempts, usage)
     static/               the browser frontend (plain HTML/CSS/JS, no build step)
         index.html, css/app.css
-        js/app.js (router), js/api.js (fetch helpers)
-        js/views/{record,history,session,progress,practice}.js
+        js/app.js (router), js/api.js (fetch helpers), js/drill.js, js/charts.js
+        js/recorder.js (microphone capture, shared by every spoken activity)
+        js/views/{today,practice,record,speech,dictation,history,session,progress}.js
 tests/
     test_app.py           transcriber + session/file-layout tests
     test_analyzer.py       Claude integration tests (fake client, no network)
     test_progress_store.py topic-aggregation tests
-    test_api.py            FastAPI route tests (fake transcriber/analyzer)
+    test_api.py            FastAPI route tests (fake transcriber/analyzer/YouTube)
+    test_learner_*.py      learner model: rules and files
+    test_exercise_sets.py  AI exercise sets (fake client)
+    test_speech_drills.py  pace/filler/pause metrics, reading alignment
+    test_dictation*.py     subtitle parsing, grading, lesson files
 recordings/            created at runtime — one folder per session
-data/                  created at runtime — progress.json
+data/                  created at runtime — progress.json, the learner model,
+                       AI exercise sets and dictation lessons
 logs/                  created at runtime
 requirements.txt
 .env.example
@@ -272,7 +298,8 @@ without starting a server, opening a browser, or touching the network.
 
 ## 9. What's not built yet
 
-The **Practice** tab (reached from a topic on the Progress tab) is a
-placeholder — grammar quizzes, translation exercises and spoken-practice
-drills are planned but not implemented. The screens exist purely as
-navigation stubs so future exercise types have an obvious home.
+The working plan lives in `progress.md`. Monologue analysis, the learner model
+(cards, Leitner repetition, the daily «Сегодня» workout), picture description,
+AI exercise sets, spoken drills and YouTube dictation are all in place; what is
+still open is listed under «Later» there. Packaging as a single `.exe` stays
+deferred while the app is a local web server.

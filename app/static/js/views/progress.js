@@ -1,6 +1,6 @@
 // Progress view: speech scores over time (one small chart per skill), topic
-// mastery (speech + exercises), spoken-drill measurements, the mistake bank
-// and what the APIs cost.
+// mastery (speech + exercises), spoken-drill measurements, the dictation's
+// tricky words, the mistake bank and what the APIs cost.
 window.Views = window.Views || {};
 
 Views.progress = (() => {
@@ -11,13 +11,15 @@ Views.progress = (() => {
     let fixes;
     let usage;
     let talks;
+    let dictation;
     try {
-      [progress, mastery, fixes, usage, talks] = await Promise.all([
+      [progress, mastery, fixes, usage, talks, dictation] = await Promise.all([
         Api.getProgress(),
         Api.getLearnerTopics(),
         Api.getLearnerItems({ kind: "fix" }),
         Api.getUsage().catch(() => null),
         Api.getTalks().catch(() => null),
+        Api.getDictationStats().catch(() => null),
       ]);
     } catch (err) {
       container.innerHTML = `<div class="card"><p class="muted">Не удалось загрузить прогресс: ${escapeHtml(err.message)}</p></div>`;
@@ -47,6 +49,7 @@ Views.progress = (() => {
         ${renderTopics(mastery.topics, progress.topics)}
       </div>
       ${renderTalks(talks)}
+      ${renderDictation(dictation)}
       <div class="card">
         <h2>Банк ошибок</h2>
         ${renderMistakes(fixes.items, labels)}
@@ -117,6 +120,44 @@ Views.progress = (() => {
   }
 
   // «60 секунд»: every series, its first (spontaneous) take against its last.
+  // Dictation is not part of the topic taxonomy (it trains listening and
+  // spelling), so it gets its own numbers plus the words that keep going
+  // wrong - each with the same free references as a phrase card.
+  function renderDictation(stats) {
+    if (!stats || !stats.sentences) return "";
+    const words = stats.tricky_words || [];
+    return `
+      <div class="card">
+        <h2>Диктант</h2>
+        <p class="muted">Уроков: ${stats.lessons} · надиктовано предложений: ${stats.sentences}
+          · слов: ${stats.words}${
+            stats.accuracy == null ? "" : ` · точность ${Math.round(stats.accuracy * 100)}%`
+          } · подсказок: ${stats.hints}</p>
+        ${
+          words.length
+            ? `<h3>Сложные слова</h3>
+               <p class="muted">Не расслышаны или набраны с подсказкой не меньше двух раз.</p>
+               <ul class="tricky-words">
+                 ${words.map(trickyWord).join("")}
+               </ul>`
+            : `<p class="muted">Слов, которые стабильно не даются, пока нет.</p>`
+        }
+      </div>`;
+  }
+
+  function trickyWord(row) {
+    const q = encodeURIComponent(row.word);
+    return `
+      <li>
+        <span class="phrase">${escapeHtml(row.word)}</span>
+        <span class="muted"> — не расслышано ${row.missed}, с подсказкой ${row.hinted}</span>
+        <span class="deep-links">
+          <a href="https://youglish.com/pronounce/${q}/english" target="_blank" rel="noopener">YouGlish ↗</a>
+          <a href="https://dictionary.cambridge.org/search/english/?q=${q}" target="_blank" rel="noopener">Cambridge ↗</a>
+        </span>
+      </li>`;
+  }
+
   function renderTalks(talks) {
     const series = ((talks && talks.series) || []).filter((s) =>
       s.rounds.some((r) => r.metrics && r.metrics.words)

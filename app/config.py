@@ -361,6 +361,46 @@ SHADOWING_MAX_WORDS: Final[int] = 50
 UNCLEAR_CONFIDENCE: Final[float] = 0.6
 WORKOUT_MINUTES_SPEECH: Final[float] = 4.0
 
+# --- Listening dictation (Stage 7, $0: YouTube subtitles only) ------------
+# A lesson is one YouTube video: its audio plus the reference text, which
+# always comes from the video's own subtitles (manual ones first, otherwise
+# YouTube's automatic ones). Nothing here calls Deepgram or Claude - a video
+# without usable subtitles is refused instead (decided 2026-09-20).
+DICTATION_DIRNAME: Final[str] = "dictation"
+LESSON_META_FILENAME: Final[str] = "lesson.json"
+LESSON_SUBTITLES_FILENAME: Final[str] = "subtitles.vtt"
+# Append-only, authoritative: every dictated sentence, like attempts.jsonl.
+LESSON_RESULTS_FILENAME: Final[str] = "results.jsonl"
+DICTATION_AUDIO_STEM: Final[str] = "audio"
+LESSON_SCHEMA_VERSION: Final[int] = 1
+# lesson.json `status` while the import runs in the background.
+LESSON_STATUS_IMPORTING: Final[str] = "importing"
+LESSON_STATUS_READY: Final[str] = "ready"
+LESSON_STATUS_ERROR: Final[str] = "error"
+# Longer videos mean a long download and a lesson nobody finishes.
+DICTATION_MAX_SECONDS: Final[int] = 20 * 60
+# Subtitle languages accepted per language profile, best first. An automatic
+# caption track is accepted only in the video's own language - YouTube also
+# offers machine translations, which do not match what is being said.
+DICTATION_SUBTITLE_LANGUAGES: Final[dict] = {
+    "en-US": ("en",),
+    "ru": ("ru",),
+    "multi": ("en", "ru"),
+}
+# Sentences are built from the subtitle cues: shorter ones are joined with
+# the next, longer ones are split at a comma (or hard-capped).
+DICTATION_MIN_WORDS: Final[int] = 4
+DICTATION_MAX_WORDS: Final[int] = 18
+# Subtitle timings are tight; a little air on both sides keeps the first and
+# last syllable of a sentence audible when only that segment is played.
+DICTATION_PAD_SECONDS: Final[float] = 0.25
+# The daily workout's dictation step is done at this many sentences.
+DICTATION_DAILY_SENTENCES: Final[int] = 5
+WORKOUT_MINUTES_DICTATION: Final[float] = 4.0
+# «Сложные слова» on «Прогресс»: words missed or hinted at least this often.
+DICTATION_TRICKY_MIN_MISSES: Final[int] = 2
+DICTATION_TRICKY_LIMIT: Final[int] = 20
+
 # --- Pricing (estimates for the usage log, USD) --------------------------
 # Per million tokens: (input, output). Cache writes bill at 1.25x input,
 # cache reads at 0.1x input. Unknown models are logged with cost_usd = None.
@@ -426,6 +466,11 @@ def data_dir() -> Path:
 def practice_dir() -> Path:
     """AI exercise sets (data/practice/<set id>.json)."""
     return data_dir() / PRACTICE_DIRNAME
+
+
+def dictation_dir() -> Path:
+    """Dictation lessons (data/dictation/<video id>/: audio, subtitles, results)."""
+    return data_dir() / DICTATION_DIRNAME
 
 
 def load_environment() -> None:

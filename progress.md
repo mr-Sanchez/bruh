@@ -7,7 +7,7 @@ with a date when they ship.
 
 The app is growing step by step into a language-learning **platform**. Recording and
 analysing a monologue is no longer the centre of the app; it is one *activity* among
-several (monologue, picture description, topic drills, later dictation). Every activity
+several (monologue, picture description, topic drills, spoken drills, dictation). Every activity
 writes its results into **one shared learner model**, and that model decides what to
 train next.
 
@@ -28,10 +28,45 @@ Constraints for every new exercise:
   offer only the $0 layer.
 
 Target navigation: `Сегодня` (new home: daily workout) · `Занятия` (Монолог, Описание
-картинки, Тренажёры по темам, later Диктант) · `История` (all activities) · `Прогресс`
+картинки, Диктант, Тренажёры по темам) · `История` (all activities) · `Прогресс`
 (score charts, topic mastery, mistake bank).
 
 ## Done
+
+- **2026-09-20 — Stage 7: listening dictation from YouTube ($0).** «Диктант» (`#/dictation`)
+  under «Занятия»: paste a YouTube link, and the video becomes a lesson — its audio plus the
+  sentences of its **own subtitle track**. Modelled on ear2finger (researched with the user
+  on 2026-09-20), rebuilt on this app's own architecture.
+  - **Import** (`app/youtube.py`, yt-dlp, lazily imported): one metadata pass, then audio +
+    captions. Decided with the user: **subtitles or nothing** — manual captions first,
+    automatic ones otherwise, and a video with neither is refused instead of being sent to
+    Deepgram. Automatic captions count only in the video's own language (YouTube's machine
+    translations do not match the audio). Videos longer than 20 minutes are refused. No
+    transcoding, so **FFmpeg is not needed**; `yt-dlp` is the 7th pinned dependency and its
+    absence degrades gracefully (a clear message, the rest of the app unaffected).
+  - **Sentences** (`app/dictation.py`, pure): the caption cues are parsed, the rolling
+    repetition of automatic captions is removed, and words are glued into 4–18-word
+    sentences at sentence punctuation (or, failing that, at a comma), each with the play
+    window it needs (± 0.25 s of air).
+  - **Workspace**: one sentence at a time, **one input per word** (punctuation is shown, not
+    typed), with ear2finger's keys — Enter listens again, Space jumps to the next word, Tab
+    reveals the current word, Backspace in an empty field steps back, `[`/`]` move between
+    sentences. Speed 0.5–2×, repeat 0/1/3/5/10/∞ (∞ = until it is right), pause 0/3/5/10 s
+    between sentences. Checking ignores case and punctuation, live per keystroke; mistyped
+    characters are counted the way they are made ("ошибкой считать как у них" — the user).
+  - **Results** are logged per sentence to `data/dictation/<id>/results.jsonl` (append-only,
+    authoritative) and **graded again on the server**, so the stored numbers never depend on
+    the browser. A half-typed sentence that is left behind is logged too — those are the
+    words worth showing later.
+  - **Learner model**: dictation stays out of `attempts.jsonl` and the item bank (decided
+    2026-09-20 — mishearing a word is not one of the taxonomy's speaking mistakes). It gets
+    its own «Сложные слова» list on «Прогресс» (missed or hinted ≥ 2 times, with YouGlish /
+    Cambridge links), a line per day in «История», and it keeps the day streak alive.
+  - **«Сегодня»**: a **mandatory** step (the user's choice), done at 5 sentences a day,
+    ≈ 4 minutes; with no lesson imported yet it shows as "empty" and invites an import
+    instead of blocking the workout. 202 tests, all offline (a fake yt-dlp, no network).
+  - **Still to check:** the sentence length (4–18 words) and the daily 5 on real videos, and
+    how readable automatic captions are as a reference — both are first guesses.
 
 - **2026-09-20 — Stage 6: spoken drills (Deepgram only).** Two activities that cost no
   Claude call at all: their whole result is computed from the word timings Deepgram
@@ -199,13 +234,15 @@ Done 2026-09-19 — see «Done» above.
 
 Done 2026-09-20 — see «Done» above.
 
+## Stage 7 — Listening dictation from YouTube
+
+Done 2026-09-20 — see «Done» above.
+
 ## Later
 
-- [ ] **Listening dictation from YouTube (ear2finger-style).** Paste a link, get the audio
-      split into segments, type a dictation of each one, check it. Explicitly deferred
-      by the user. Open questions: fetching YouTube audio or captions needs a new
-      dependency (e.g. yt-dlp) beyond the pinned set; the reference text could come from
-      captions or from a Deepgram transcript.
+- [ ] Dictation follow-ups, once there is real usage: a lesson's tricky words could become
+      listening cards (replaying their own sentence), and a lesson could be limited to a
+      chosen time range instead of the whole video.
 - [ ] Score consistency: optionally give Claude the previous scores as context so the
       scale stays stable across sessions.
 - [ ] PyInstaller packaging (deferred — a persistent server doesn't fit onefile).

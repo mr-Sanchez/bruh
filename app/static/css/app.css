@@ -554,3 +554,68 @@ a.activity:hover { border-color: var(--accent); }
 .read-unclear { color: var(--warning); border-bottom: 2px dotted var(--warning); }
 .read-extra { color: var(--text-muted); font-size: 0.85rem; }
 .reading-legend { font-size: 0.82rem; }
+
+/* Dictation (Stage 7): the lesson list and the typing workspace. */
+.dictation-import { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 6px; }
+.dictation-import input {
+  flex: 1 1 320px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+.lesson-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 4px;
+  border-top: 1px solid var(--border);
+}
+.lesson-row:first-of-type { border-top: 0; }
+.lesson-row.is-removing { opacity: 0.4; }
+.lesson-title { font-weight: 600; }
+.lesson-meta { color: var(--text-muted); font-size: 0.85rem; margin-top: 2px; }
+.lesson-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.lesson-bar { height: 4px; border-radius: 2px; background: var(--grid); margin-top: 8px; width: 220px; max-width: 100%; }
+.lesson-bar span { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+.dictation-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 12px 0;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+.dictation-controls select {
+  margin-left: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+.dictation-line { line-height: 2.4; font-size: 1.05rem; }
+.dict-punct { color: var(--text-muted); }
+.dict-word {
+  font: inherit;
+  padding: 2px 6px;
+  border: 0;
+  border-bottom: 2px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  min-width: 3ch;
+}
+.dict-word:focus { outline: 0; border-bottom-color: var(--accent); background: var(--accent-weak); }
+.dict-word.is-correct { color: var(--success); border-bottom-color: var(--success); }
+.dict-word.is-wrong { color: var(--danger); border-bottom-color: var(--danger); }
+.dict-word.is-hinted { font-style: italic; border-bottom-style: dashed; }
+.dictation-verdict { min-height: 1.4em; margin: 12px 0 4px; }
+.dictation-verdict.is-clean { color: var(--success); font-weight: 600; }
+.dictation-verdict.is-ok { color: var(--text); }
+.dictation-help { font-size: 0.82rem; }
+.tricky-words { list-style: none; margin: 0; padding: 0; }
+.tricky-words li { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.tricky-words .phrase { font-weight: 600; }

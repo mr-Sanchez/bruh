@@ -94,6 +94,26 @@ const Api = (() => {
         body: JSON.stringify({ answers, context: context || null }),
       }),
 
+    // Dictation (Stage 7, free): importing a lesson runs in the background on
+    // the server, so the list is polled until it is ready.
+    listLessons: () => request("/api/dictation/lessons"),
+    getLesson: (id) => request(`/api/dictation/lessons/${encodeURIComponent(id)}`),
+    importLesson: (url, language) =>
+      request("/api/dictation/lessons", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, language: language || "en-US" }),
+      }),
+    deleteLesson: (id) =>
+      request(`/api/dictation/lessons/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    postLessonResult: (id, result) =>
+      request(`/api/dictation/lessons/${encodeURIComponent(id)}/results`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(result),
+      }),
+    getDictationStats: () => request("/api/dictation/stats"),
+
     analyzeSession: (id, force = false) =>
       request(`/api/sessions/${encodeURIComponent(id)}/analyze`, {
         method: "POST",
@@ -117,6 +137,19 @@ function formatDuration(totalSeconds) {
   const s = seconds % 60;
   const pad = (n) => String(n).padStart(2, "0");
   return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+// Russian plural: pluralRu(2, "предложение", "предложения", "предложений").
+function pluralRu(count, one, few, many) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+function sentencesWord(count) {
+  return pluralRu(count, "предложение", "предложения", "предложений");
 }
 
 // "2.8 ¢" from a USD amount; one decimal is enough at this price range.

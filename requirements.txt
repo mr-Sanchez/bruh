@@ -5,6 +5,7 @@ fastapi>=0.115,<1.0.0         # local web backend
 uvicorn[standard]>=0.30,<1.0.0  # ASGI server
 python-multipart>=0.0.9       # required by FastAPI for multipart audio uploads
 python-dotenv>=1.0.0,<2.0.0   # optional .env support for API keys
+yt-dlp>=2025.1.15             # dictation: YouTube audio + subtitles (no FFmpeg needed)
 
 # PyInstaller packaging is deferred while the app is a local web server -
 # see README "Running the app" / "Packaging" sections.

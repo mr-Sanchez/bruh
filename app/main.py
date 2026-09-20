@@ -183,6 +183,34 @@ def self_test() -> int:
         ok = False
 
     try:
+        from app import dictation
+        from app.youtube import video_id_from_url
+
+        # The dictation path, end to end and offline: a caption file becomes
+        # sentences, and a typed answer is graded against one of them.
+        vtt = (
+            "WEBVTT\n\n"
+            "00:00:01.000 --> 00:00:04.000\n"
+            "Hello everyone, and welcome back.\n"
+        )
+        sentences = dictation.lesson_sentences(vtt)
+        assert sentences and sentences[0]["words"] == 5
+        assert dictation.grade_sentence(
+            sentences[0]["text"], ["hello", "everyone", "and", "welcome", "back"]
+        )["completed"]
+        assert video_id_from_url("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+        # yt-dlp is optional: only report whether this build can import.
+        try:
+            import yt_dlp  # noqa: F401
+
+            logger.info("selftest: dictation OK (yt-dlp %s)", yt_dlp.version.__version__)
+        except ImportError:
+            logger.info("selftest: dictation rules OK; yt-dlp is not installed")
+    except Exception:
+        logger.exception("selftest: dictation FAILED")
+        ok = False
+
+    try:
         from app.server import create_app
 
         create_app()

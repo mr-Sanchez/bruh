@@ -96,6 +96,11 @@ Views.practice = (() => {
             <span><strong>60 секунд</strong><br/>
               <span class="topic-meta">Минута на тему, три раза подряд: темп, паразиты, паузы · без Claude</span></span>
           </a>
+          <a class="activity" href="#/dictation">
+            <span class="activity-icon" aria-hidden="true">⌨️</span>
+            <span><strong>Диктант</strong><br/>
+              <span class="topic-meta">Видео с YouTube: набрать на слух по субтитрам · бесплатно</span></span>
+          </a>
           <a class="activity" href="#/shadowing">
             <span class="activity-icon" aria-hidden="true">🗣️</span>
             <span><strong>Shadowing</strong><br/>
