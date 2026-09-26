@@ -23,6 +23,11 @@
   --gold: #f6bc59;
   --orange: #f37950;
   --teal: #1e9d8a;
+  /* dark discs behind coloured icons */
+  --tone-gold-bg: #4a3522;
+  --tone-orange-bg: #4a2230;
+  --tone-teal-bg: #173a36;
+  --tone-plum-bg: #4a1f40;
   --danger: #ff7b8c;
   --danger-weak: #4a1a2a;
   --success: #3cc9b2;
@@ -59,6 +64,9 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; letter-spacing:
 
 /* --- shell: sidebar + content -------------------------------------------- */
 .shell { display: flex; min-height: 100vh; }
+@media (min-width: 761px) {
+  .shell { background: linear-gradient(to right, var(--sidebar) 239px, var(--border) 239px, var(--border) 240px, var(--bg) 240px); }
+}
 
 .sidebar {
   width: 240px;
@@ -383,10 +391,10 @@ button.success { background: var(--success); }
 }
 .step-mark.tone-done { background: var(--teal); color: var(--on-accent); }
 .step-mark.tone-done .icon { stroke-width: 2.8; }
-.step-mark.tone-gold { background: #4a3522; color: var(--gold); }
-.step-mark.tone-orange { background: #4a2230; color: var(--orange); }
-.step-mark.tone-teal { background: #173a36; color: var(--success); }
-.step-mark.tone-plum { background: #4a1f40; color: var(--plum-border); }
+.step-mark.tone-gold { background: var(--tone-gold-bg); color: var(--gold); }
+.step-mark.tone-orange { background: var(--tone-orange-bg); color: var(--orange); }
+.step-mark.tone-teal { background: var(--tone-teal-bg); color: var(--success); }
+.step-mark.tone-plum { background: var(--tone-plum-bg); color: var(--plum-border); }
 .step-body { min-width: 0; }
 .step-body p { margin: 4px 0 0; font-size: 0.9rem; }
 .step-title { font-weight: 600; font-size: 1rem; }
@@ -573,10 +581,10 @@ a.activity:hover { border-color: var(--plum-border); color: var(--text); }
   background: var(--accent-weak);
   color: var(--accent);
 }
-.activity-icon.tone-gold { background: #4a3522; color: var(--gold); }
-.activity-icon.tone-orange { background: #4a2230; color: var(--orange); }
-.activity-icon.tone-teal { background: #173a36; color: var(--success); }
-.activity-icon.tone-plum { background: #4a1f40; color: var(--plum-border); }
+.activity-icon.tone-gold { background: var(--tone-gold-bg); color: var(--gold); }
+.activity-icon.tone-orange { background: var(--tone-orange-bg); color: var(--orange); }
+.activity-icon.tone-teal { background: var(--tone-teal-bg); color: var(--success); }
+.activity-icon.tone-plum { background: var(--tone-plum-bg); color: var(--plum-border); }
 .session-when { display: inline-flex; align-items: center; gap: 10px; }
 .kind-icon { color: var(--text-muted); display: inline-flex; }
 .history-day { display: flex; justify-content: space-between; gap: 12px; padding: 12px 4px; }
@@ -708,8 +716,6 @@ a.activity:hover { border-color: var(--plum-border); color: var(--text); }
 .scene-list { list-style: none; margin: 0; padding: 0; }
 .scene-list li { padding: 6px 0; }
 .scene-list .phrase { font-weight: 600; }
-
-}
 
 /* AI exercise set (drill.js runSet) */
 .set-intro {
