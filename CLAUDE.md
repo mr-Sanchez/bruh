@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Voice Practice Coach — a local-only web app for practising spoken English/Russian.
+English Coach — a local-only web app for practising spoken English/Russian.
 Record in the browser (a monologue, or a picture description — spoken or typed) → verbatim
 Deepgram transcript → on-demand Claude feedback in Russian, tagged by topic and aggregated
 across sessions. Listening goes the other way: a YouTube video becomes a dictation lesson.

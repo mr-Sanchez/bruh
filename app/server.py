@@ -29,7 +29,7 @@ class RevalidatingStaticFiles(StaticFiles):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Voice Practice Coach")
+    app = FastAPI(title="English Coach")
 
     # Registered first: /api/* must never be shadowed by the static catch-all.
     app.include_router(api_router)

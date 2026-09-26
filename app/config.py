@@ -15,7 +15,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Final, Optional
 
-APP_NAME: Final[str] = "Voice Practice Coach"
+APP_NAME: Final[str] = "English Coach"
 
 # --- Audio ---------------------------------------------------------------
 # 16 kHz / mono / 16-bit PCM is what Deepgram's models actually consume:

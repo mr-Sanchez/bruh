@@ -1,6 +1,6 @@
 # Plan & progress
 
-Working plan for the Voice Practice Coach. Keep items short; move them to "Done"
+Working plan for the English Coach. Keep items short; move them to "Done"
 with a date when they ship.
 
 ## Direction (decided 2026-09-19)

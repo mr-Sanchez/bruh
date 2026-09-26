@@ -1,4 +1,4 @@
-# Voice Practice Coach
+# English Coach
 
 A small local web app for practising spoken English (and Russian): record
 yourself, get a **faithful, verbatim transcript**, then ask Claude for
