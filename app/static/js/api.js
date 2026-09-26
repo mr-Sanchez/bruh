@@ -303,7 +303,7 @@ function renderLessonCheck(lesson) {
       ${
         check.good_uses && check.good_uses.length
           ? `<p class="muted">Получилось:</p><ul>${check.good_uses
-              .map((q) => `<li class="correction">✅ «${escapeHtml(q)}»</li>`)
+              .map((q) => `<li class="correction">✓ «${escapeHtml(q)}»</li>`)
               .join("")}</ul>`
           : ""
       }
@@ -311,8 +311,8 @@ function renderLessonCheck(lesson) {
         check.missed && check.missed.length
           ? `<p class="muted">Здесь правило было нужно:</p>${check.missed
               .map(
-                (m) => `<p class="quote">❌ «${escapeHtml(m.quote)}»</p>
-                        <p class="correction">✅ ${escapeHtml(m.better)}</p>`
+                (m) => `<p class="quote">✕ «${escapeHtml(m.quote)}»</p>
+                        <p class="correction">✓ ${escapeHtml(m.better)}</p>`
               )
               .join("")}`
           : ""
@@ -350,9 +350,9 @@ async function renderIssue(issue) {
       <span class="pill ${severityClass}">${escapeHtml(severityText)}</span>
       <span class="muted"> · <a href="#/practice/${encodeURIComponent(issue.topic)}"
         title="Теория, упражнения и карточки по этой теме">${escapeHtml(label)}</a></span>
-      <p class="quote">❌ «${escapeHtml(issue.quote)}»</p>
+      <p class="quote">✕ «${escapeHtml(issue.quote)}»</p>
       <p>${escapeHtml(issue.explanation)}</p>
-      <p class="correction">✅ ${escapeHtml(issue.correction)}</p>
+      <p class="correction">✓ ${escapeHtml(issue.correction)}</p>
       ${
         betterVersions.length
           ? `<div class="better-versions">

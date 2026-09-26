@@ -46,7 +46,8 @@ app/progress_store.py   topic aggregation + score history → data/progress.json
 app/theme_store.py      the ONLY reader/writer of data/themes.json (own contexts, last used)
 app/static/js/          app.js (hash router), api.js, drill.js, recorder.js (shared by every
                         spoken activity), themes.js (the «уклон» picker), charts.js,
-                        translation.js, views/*.js
+                        icons.js, translation.js, views/*.js
+app/static/css/app.css  «Закат» dark theme: colour tokens on :root, sidebar shell
 ```
 
 Library modules stay framework-agnostic and are built through factory dependencies
@@ -146,7 +147,9 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
 * Typed exceptions (`TranscriptionError`, `AnalysisError`, …) carry a human message;
   `api.py` maps them to 400 (missing key) / 502 (upstream failure).
 * Code and comments in **English**; UI text and Claude's feedback in **Russian**.
-* Frontend: no bundler, no deps. Each view is an IIFE registering `window.Views.<name>` with
+* Frontend: no bundler, no deps. Look = the «Итог» board of the design canvas: plum grounds,
+  coral accent, pill buttons, Unbounded / Onest (Google Fonts, system fallback offline).
+  Colours only via the `:root` tokens; icons are `Icons.*` stroke SVGs, never emoji. Each view is an IIFE registering `window.Views.<name>` with
   `render(container, param)` and optional `dispose()`. New routes → `app.js`'s
   `TAB_FOR_ROUTE`; new endpoints → `api.js`.
 * Recording duration is measured client-side on purpose — no server-side audio decoding.

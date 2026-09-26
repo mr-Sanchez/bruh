@@ -77,7 +77,7 @@ Views.record = (() => {
         <div id="picture-drop" class="picture-drop">
           <img id="picture-preview" class="picture-preview" alt="Картинка для описания" hidden />
           <div id="picture-empty" class="picture-empty">
-            <span class="activity-icon" aria-hidden="true">🖼️</span>
+            <span class="activity-icon tone-orange">${Icons.image}</span>
             <p>Перетащите картинку сюда или вставьте из буфера (Ctrl+V)</p>
             <label class="button-like">Выбрать файл
               <input type="file" id="picture-input" accept="image/*" hidden /></label>

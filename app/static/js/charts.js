@@ -19,7 +19,7 @@ const Charts = (() => {
     return `
       <svg class="sparkline" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-hidden="true">
         <path d="${path}" fill="none" stroke="var(--spark-line)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-        <circle cx="${x(last)}" cy="${y(points[last])}" r="4" fill="var(--series-1)" stroke="var(--surface)" stroke-width="2"/>
+        <circle cx="${x(last)}" cy="${y(points[last])}" r="4" fill="var(--series-dot)" stroke="var(--surface)" stroke-width="2"/>
       </svg>`;
   }
 

@@ -33,7 +33,10 @@
   function setActiveTab(route) {
     const tab = TAB_FOR_ROUTE[route] || DEFAULT_ROUTE;
     document.querySelectorAll(".tabs a").forEach((a) => {
-      a.classList.toggle("active", a.dataset.route === tab);
+      const active = a.dataset.route === tab;
+      a.classList.toggle("active", active);
+      if (active) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
     });
   }
 
@@ -49,6 +52,7 @@
     currentView = view;
     setActiveTab(route);
     container.innerHTML = "";
+    window.scrollTo(0, 0);
     view.render(container, param);
   }
 

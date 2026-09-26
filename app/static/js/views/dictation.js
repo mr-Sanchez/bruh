@@ -383,8 +383,8 @@ Views.dictation = (() => {
       inputs.forEach((input) => paint(input, Number(input.dataset.index)));
       const clean = hints.size === 0 && errorChars === 0;
       verdict.textContent = clean
-        ? "✔ Верно, без единой ошибки"
-        : `✔ Верно · подсказок: ${hints.size} · ошибок при наборе: ${errorChars}`;
+        ? "✓ Верно, без единой ошибки"
+        : `✓ Верно · подсказок: ${hints.size} · ошибок при наборе: ${errorChars}`;
       verdict.className = `dictation-verdict ${clean ? "is-clean" : "is-ok"}`;
       // Done: no more repeats of this sentence.
       repeatsLeft = 0;

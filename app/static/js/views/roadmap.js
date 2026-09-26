@@ -55,7 +55,7 @@ Views.roadmap = (() => {
                  <a href="${lessonHref(next.lesson.id)}"><button>Продолжить: ${escapeHtml(next.lesson.label)}</button></a>
                </div>
                <p class="topic-meta">${escapeHtml(next.level.label)} · ${escapeHtml(STATUS_LABELS[next.lesson.status])}</p>`
-            : `<p>Все уроки курса освоены или отмечены 🎉</p>`
+            : `<p>Все уроки курса освоены или отмечены.</p>`
         }
         <p class="muted">Все уроки открыты — можно идти не по порядку. Урок освоен, когда набор упражнений
           пройден на ${Math.round(data.pass_score * 100)} % и выше ${data.mastery_runs} раза в разные дни.

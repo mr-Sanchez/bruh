@@ -169,8 +169,8 @@ const Drill = (() => {
     return `
       <div class="card-source">
         <p class="muted">${origin}</p>
-        <p class="quote">❌ «${escapeHtml(c.quote)}»</p>
-        <p class="correction">✅ ${escapeHtml(c.correction)}</p>
+        <p class="quote">✕ «${escapeHtml(c.quote)}»</p>
+        <p class="correction">✓ ${escapeHtml(c.correction)}</p>
         ${c.explanation ? `<p>${escapeHtml(c.explanation)}</p>` : ""}
         ${
           c.focus
@@ -264,7 +264,7 @@ const Drill = (() => {
         const ok = !!verdict.correct;
         const fixed =
           !ok && verdict.corrected && normalize(verdict.corrected) !== normalize(answer)
-            ? `<p class="correction">✅ ${escapeHtml(verdict.corrected)}</p>`
+            ? `<p class="correction">✓ ${escapeHtml(verdict.corrected)}</p>`
             : "";
         const sameAsReference = normalize(answer) === normalize(ex.reference);
         result.innerHTML = `
@@ -431,7 +431,7 @@ const Drill = (() => {
       }
       if (ex.type === "fix") {
         return `
-          <p class="quote">❌ «${escapeHtml(ex.sentence)}»</p>
+          <p class="quote">✕ «${escapeHtml(ex.sentence)}»</p>
           <textarea data-role="input" rows="2" spellcheck="false">${escapeHtml(ex.sentence)}</textarea>`;
       }
       return `
@@ -536,7 +536,7 @@ const Drill = (() => {
       const rows = run.results
         .map((r) => {
           const ex = byId[r.exercise_id];
-          const mark = r.correct ? "✅" : "❌";
+          const mark = r.correct ? "✓" : "✕";
           if (ex.type === "translate") {
             const fixed = r.corrected && !r.correct && normalize(r.corrected) !== normalize(r.answer);
             return `
@@ -544,7 +544,7 @@ const Drill = (() => {
                 <p class="set-russian">${mark} ${escapeHtml(ex.russian)}</p>
                 <p><span class="muted">Ваш ответ:</span> ${escapeHtml(r.answer) || "—"}</p>
                 ${r.comment ? `<p>${escapeHtml(r.comment)}</p>` : ""}
-                ${fixed ? `<p class="correction">✅ ${escapeHtml(r.corrected)}</p>` : ""}
+                ${fixed ? `<p class="correction">✓ ${escapeHtml(r.corrected)}</p>` : ""}
                 <p class="muted">Образец: ${escapeHtml(ex.reference)}</p>
               </li>`;
           }

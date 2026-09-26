@@ -14,6 +14,7 @@ window.Views = window.Views || {};
 
 Views.today = (() => {
   let root = null;
+  let currentStep = null;
 
   const STEP_TITLES = {
     cards: "Карточки",
@@ -37,26 +38,38 @@ Views.today = (() => {
     if (root !== container) return;
 
     // Optional steps (the lesson's actions cost money) never hold back "all done".
-    const allDone = workout.steps.every((s) => s.optional || s.status === "done" || s.status === "empty");
+    const required = workout.steps.filter((s) => !s.optional && s.status !== "empty");
+    const doneCount = required.filter((s) => s.status === "done").length;
+    const allDone = doneCount === required.length;
+    // The first unfinished mandatory step is the one the screen leads with.
+    currentStep = workout.steps.find((s) => !s.optional && s.status !== "done" && s.status !== "empty") || null;
+    const share = required.length ? Math.round((doneCount / required.length) * 100) : 100;
     container.innerHTML = `
-      <div class="card">
-        <div class="today-head">
-          <div>
-            <h2>Сегодня</h2>
-            <p class="muted">${escapeHtml(formatDate(workout.today))}</p>
+      <div class="today-grid">
+        <section class="today-main">
+          <div class="today-head">
+            <div>
+              <div class="muted today-date">${escapeHtml(formatDate(workout.today))}</div>
+              <h1 class="page-title">Тренировка дня</h1>
+            </div>
+            <div class="muted today-meta">${
+              allDone ? "Всё сделано" : `≈ ${Math.max(1, workout.minutes_left)} мин`
+            } · ${doneCount} из ${required.length}</div>
           </div>
-          <div class="today-meta">
-            ${workout.streak_days ? `<div class="streak">🔥 ${workout.streak_days} ${daysWord(workout.streak_days)} подряд</div>` : ""}
-            <div class="muted">${allDone ? "Всё сделано 🎉" : `осталось ≈ ${Math.max(1, workout.minutes_left)} мин`}</div>
-          </div>
-        </div>
-        ${renderFocus(workout.focus_topic)}
-        <ol class="workout">
-          ${workout.steps.map(renderStep).join("")}
-        </ol>
-        ${allDone ? `<p class="muted">На сегодня тренировка выполнена. Можно продолжить на вкладке «Занятия».</p>` : ""}
-      </div>
-      ${renderScores(progress.score_history)}`;
+          <div class="progress-bar today-bar" role="progressbar" aria-label="Тренировка дня"
+            aria-valuemin="0" aria-valuemax="${required.length}" aria-valuenow="${doneCount}">
+            <div style="width: ${share}%"></div></div>
+          <ol class="workout">
+            ${workout.steps.map(renderStep).join("")}
+          </ol>
+          ${allDone ? `<p class="muted">На сегодня тренировка выполнена. Можно продолжить на вкладке «Занятия».</p>` : ""}
+        </section>
+        <aside class="today-aside">
+          ${renderStreak(workout.streak_days)}
+          ${renderFocus(workout.focus_topic)}
+          ${renderScores(progress.score_history)}
+        </aside>
+      </div>`;
 
     wire(container, workout);
   }
@@ -74,33 +87,71 @@ Views.today = (() => {
     return "дней";
   }
 
+  function renderStreak(days) {
+    return `
+      <div class="streak-tile">
+        ${Icons.svg("flame", 40)}
+        <div>
+          <div class="streak-value">${days} ${daysWord(days)}</div>
+          <div class="streak-note">${days ? "подряд — не прерывайте серию" : "серия начнётся с сегодняшней тренировки"}</div>
+        </div>
+      </div>`;
+  }
+
   function renderFocus(topic) {
     if (!topic) return "";
-    const accuracy = topic.accuracy == null ? "" : ` · точность в упражнениях ${Math.round(topic.accuracy * 100)}%`;
+    const accuracy = topic.accuracy == null ? null : Math.round(topic.accuracy * 100);
     const link = topic.resources.length
-      ? ` · <a href="${escapeHtml(topic.resources[0].url)}" target="_blank" rel="noopener">теория ↗</a>`
+      ? `<a href="${escapeHtml(topic.resources[0].url)}" target="_blank" rel="noopener">Теория ↗</a>`
       : "";
     return `
-      <p class="focus-topic">Главная тема сейчас:
-        <a href="#/practice/${encodeURIComponent(topic.key)}"><strong>${escapeHtml(topic.label)}</strong></a>
-        <span class="muted">${accuracy}${link}</span></p>`;
+      <div class="aside-card">
+        <div class="eyebrow">Главная тема</div>
+        <a class="focus-title" href="#/practice/${encodeURIComponent(topic.key)}">${escapeHtml(topic.label)}</a>
+        ${
+          accuracy == null
+            ? `<p class="muted">В упражнениях эту тему ещё не тренировали.</p>`
+            : `<div class="meter-row">
+                <div class="progress-bar" role="img" aria-label="Точность в упражнениях ${accuracy}%">
+                  <div style="width: ${accuracy}%"></div></div>
+                <strong>${accuracy}%</strong>
+              </div>
+              <div class="muted aside-note">точность в упражнениях</div>`
+        }
+        ${link}
+      </div>`;
   }
+
+  const STEP_ICONS = {
+    cards: ["cards", "plum"],
+    monologue: ["mic", "gold"],
+    picture: ["image", "gold"],
+    dictation: ["headphones", "teal"],
+    lesson: ["sparkle", "orange"],
+    speech: ["timer", "gold"],
+  };
 
   function stepShell(step, body, action) {
     const done = step.status === "done";
     const empty = step.status === "empty";
+    const current = step === currentStep;
+    const [icon, tone] = STEP_ICONS[step.activity === "picture" ? "picture" : step.kind] || STEP_ICONS.lesson;
+    const classes = ["workout-step", done && "is-done", empty && "is-empty", current && "is-current", step.optional && "is-optional"];
     return `
-      <li class="workout-step ${done ? "is-done" : ""} ${empty ? "is-empty" : ""}">
-        <span class="step-mark" aria-hidden="true">${done ? "✓" : ""}</span>
+      <li class="${classes.filter(Boolean).join(" ")}">
+        <span class="step-mark ${done ? "tone-done" : `tone-${tone}`}" aria-hidden="true">${
+          done ? Icons.svg("check", 20) : Icons.svg(icon, 20)
+        }</span>
         <div class="step-body">
           <div class="step-title">${step.activity === "picture" ? "Описание картинки" : STEP_TITLES[step.kind]}
-            ${step.minutes && !done ? `<span class="muted step-time">≈ ${step.minutes} мин</span>` : ""}
-            ${step.optional && !done ? `<span class="muted step-time">· по желанию</span>` : ""}
+            ${step.minutes && !done ? `<span class="step-time">· ≈ ${step.minutes} мин</span>` : ""}
+            ${step.optional && !done ? `<span class="step-time">· по желанию</span>` : ""}
+            ${current ? `<span class="step-time">· следующий шаг</span>` : ""}
             ${done ? `<span class="visually-hidden">— выполнено</span>` : ""}
           </div>
           ${body}
         </div>
-        <div class="step-action">${action || ""}</div>
+        ${action ? `<div class="step-action">${action}</div>` : ""}
       </li>`;
   }
 
@@ -227,8 +278,7 @@ Views.today = (() => {
     const prompt = step.prompt;
     const question = `
       <p class="speaking-question">${escapeHtml(prompt.question)}</p>
-      <p class="muted">${escapeHtml(prompt.hint)} · уклон «${escapeHtml(prompt.theme.label)}» · 1–3 минуты, затем анализ</p>
-      <p class="muted">Или вместо монолога <a href="#/picture">опишите картинку</a>.</p>`;
+      <p class="muted">${escapeHtml(prompt.hint)} · уклон «${escapeHtml(prompt.theme.label)}» · 1–3 минуты, затем анализ</p>`;
     if (step.status === "done") {
       return stepShell(
         step,
@@ -246,20 +296,23 @@ Views.today = (() => {
     return stepShell(
       step,
       question,
-      `<a href="#/record/${encodeURIComponent(prompt.id)}"><button>Записать</button></a>`
+      `<a href="#/record/${encodeURIComponent(prompt.id)}"><button><span class="rec-dot" aria-hidden="true"></span>Записать</button></a>
+       <a href="#/picture"><button class="secondary">Описать картинку</button></a>`
     );
   }
 
+  // Overall score over the last recordings; the full set lives on «Прогресс».
   function renderScores(history) {
-    if (!history || !history.length) return "";
+    const values = Charts.sortedHistory(history)
+      .map((e) => e.overall)
+      .filter((v) => v != null);
+    if (!values.length) return "";
     return `
-      <div class="card">
-        <div class="today-head">
-          <h2>Оценки речи</h2>
-          <a href="#/progress">Все графики →</a>
-        </div>
-        <p class="muted">Последняя оценённая запись и изменение к предыдущей.</p>
-        ${Charts.scoreTiles(history)}
+      <div class="aside-card aside-scores">
+        <div class="eyebrow">Оценки речи</div>
+        ${Charts.sparkline(values, { width: 272, height: 120 })}
+        <div class="meter-row"><span class="muted">последняя</span><strong>${values[values.length - 1]} / 10</strong></div>
+        <a href="#/progress">Все графики →</a>
       </div>`;
   }
 

@@ -69,32 +69,32 @@ Views.practice = (() => {
         <h2>Занятия</h2>
         <div class="activity-grid">
           <a class="activity" href="#/roadmap">
-            <span class="activity-icon" aria-hidden="true">🧭</span>
+            <span class="activity-icon">${Icons.compass}</span>
             <span><strong>Курс A2 → C1</strong><br/>
               <span class="topic-meta">Уроки по порядку: грамматика, лексика, общение · продолжить с того места, где остановились</span></span>
           </a>
           <a class="activity" href="#/record">
-            <span class="activity-icon" aria-hidden="true">🎙️</span>
+            <span class="activity-icon tone-gold">${Icons.mic}</span>
             <span><strong>Монолог</strong><br/>
               <span class="topic-meta">Свободная речь, запись и разбор${escapeHtml(price("analysis"))}</span></span>
           </a>
           <a class="activity" href="#/picture">
-            <span class="activity-icon" aria-hidden="true">🖼️</span>
+            <span class="activity-icon tone-orange">${Icons.image}</span>
             <span><strong>Описание картинки</strong><br/>
               <span class="topic-meta">Голосом или текстом; что упущено и слова для сцены${escapeHtml(price("picture_analysis"))}</span></span>
           </a>
           <a class="activity" href="#/talk">
-            <span class="activity-icon" aria-hidden="true">⏱️</span>
+            <span class="activity-icon tone-gold">${Icons.timer}</span>
             <span><strong>60 секунд</strong><br/>
               <span class="topic-meta">Минута на тему, три раза подряд: темп, паразиты, паузы · без Claude</span></span>
           </a>
           <a class="activity" href="#/dictation">
-            <span class="activity-icon" aria-hidden="true">⌨️</span>
+            <span class="activity-icon tone-teal">${Icons.headphones}</span>
             <span><strong>Диктант</strong><br/>
               <span class="topic-meta">Видео с YouTube: набрать на слух по субтитрам · бесплатно</span></span>
           </a>
           <a class="activity" href="#/shadowing">
-            <span class="activity-icon" aria-hidden="true">🗣️</span>
+            <span class="activity-icon tone-plum">${Icons.speak}</span>
             <span><strong>Shadowing</strong><br/>
               <span class="topic-meta">Прочитать вслух свою «улучшенную версию» и увидеть, что не прозвучало · без Claude</span></span>
           </a>
@@ -107,7 +107,7 @@ Views.practice = (() => {
       const nothingYet = queue.new_waiting === 0;
       return nothingYet
         ? `<p class="muted">Карточек пока нет. Они появляются из анализа записей — запишите монолог и нажмите «Анализировать».</p>`
-        : `<p>На сегодня всё 🎉</p><p class="muted">Новые карточки (${queue.new_waiting}) ждут следующих дней.</p>`;
+        : `<p>На сегодня всё.</p><p class="muted">Новые карточки (${queue.new_waiting}) ждут следующих дней.</p>`;
     }
     return `
       <p>Повторить: <strong>${queue.reviews.length}</strong> · новых: <strong>${queue.new.length}</strong>
@@ -434,8 +434,8 @@ Views.practice = (() => {
                .map(
                  (m) => `
                <div class="issue-card">
-                 <p class="quote">❌ ${escapeHtml(m.wrong)}</p>
-                 <p class="correction">✅ ${escapeHtml(m.right)}</p>
+                 <p class="quote">✕ ${escapeHtml(m.wrong)}</p>
+                 <p class="correction">✓ ${escapeHtml(m.right)}</p>
                  <p class="muted">${escapeHtml(m.why)}</p>
                </div>`
                )
@@ -449,8 +449,8 @@ Views.practice = (() => {
                .map(
                  (m) => `
                <div class="issue-card">
-                 <p class="quote">❌ «${escapeHtml(m.said)}»</p>
-                 <p class="correction">✅ ${escapeHtml(m.correct)}</p>
+                 <p class="quote">✕ «${escapeHtml(m.said)}»</p>
+                 <p class="correction">✓ ${escapeHtml(m.correct)}</p>
                  <p>${escapeHtml(m.comment)}</p>
                </div>`
                )

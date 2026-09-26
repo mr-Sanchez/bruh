@@ -168,9 +168,9 @@ Views.moduletest = (() => {
               <p>${escapeHtml(text)}</p>
               ${
                 r.correct
-                  ? `<p class="correction">✅ ${escapeHtml(r.right_answer)}</p>`
-                  : `<p class="quote">❌ ${escapeHtml(given || "(нет ответа)")}</p>
-                     <p class="correction">✅ ${escapeHtml(r.right_answer)}</p>`
+                  ? `<p class="correction">✓ ${escapeHtml(r.right_answer)}</p>`
+                  : `<p class="quote">✕ ${escapeHtml(given || "(нет ответа)")}</p>
+                     <p class="correction">✓ ${escapeHtml(r.right_answer)}</p>`
               }
               ${r.explanation ? `<p class="muted">${escapeHtml(r.explanation)}</p>` : ""}
             </div>`;

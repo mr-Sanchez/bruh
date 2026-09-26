@@ -4,7 +4,7 @@
 window.Views = window.Views || {};
 
 Views.history = (() => {
-  const KIND_ICONS = { picture: "🖼️ ", talk: "⏱️ ", shadowing: "🗣️ ", monologue: "🎙️ " };
+  const KIND_ICONS = { picture: "image", talk: "timer", shadowing: "speak", monologue: "mic" };
 
   const DRILL_NAMES = { ai_set: "AI-набор", cloze: "пропуски", talk: "60 секунд", shadowing: "shadowing" };
 
@@ -38,11 +38,11 @@ Views.history = (() => {
               (s) => `
             <li>
               <a href="#/session/${encodeURIComponent(s.id)}">
-                <span>${KIND_ICONS[s.kind] || "🎙️ "}${escapeHtml(s.started_at)} · ${escapeHtml(s.language)}</span>
+                <span class="session-when"><span class="kind-icon">${Icons.svg(KIND_ICONS[s.kind] || "mic", 18)}</span>${escapeHtml(s.started_at)} · ${escapeHtml(s.language)}</span>
                 <span class="muted">
                   ${s.input_mode === "text" ? "текстом" : formatDuration(s.duration_seconds)}
                   · ${escapeHtml(STATUS_LABELS[s.status] || s.status)}
-                  ${s.has_analysis ? " · 🧠 есть анализ" : ""}
+                  ${s.has_analysis ? " · есть анализ" : ""}
                 </span>
               </a>
             </li>`
