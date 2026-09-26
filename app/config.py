@@ -178,34 +178,24 @@ REVIEW_BACKLOG_THRESHOLD: Final[int] = 30
 # Topic accuracy is measured over this many most recent attempts.
 TOPIC_ACCURACY_WINDOW: Final[int] = 20
 
-# --- Free drills (Stage 2, $0) ---------------------------------------------
-# A fix card is a sentence scramble while the item is new or in box 1 and its
-# correction has SCRAMBLE_MIN..SCRAMBLE_MAX words; typed recall after that.
-SCRAMBLE_MIN_WORDS: Final[int] = 3
-SCRAMBLE_MAX_WORDS: Final[int] = 16
-# Typed answers longer than this are compared by the learner, not by code:
-# exact matching a 20-word sentence fails on harmless variations.
-TYPED_CHECK_MAX_WORDS: Final[int] = 16
-# A topic drill (cloze) counts as "correct" in the attempts log at this share
-# of right gaps; its exact share is stored as `score` and feeds topic accuracy.
+# --- Cards -------------------------------------------------------------------
+# A mistake card is a new Russian sentence to say in English on the same
+# construction (decided 2026-09-26): the analysis writes this many per English
+# mistake, and each review takes the next one, so an answer is never learned by
+# heart. Mistakes analysed before that have no such sentences and are retired.
+DRILLS_PER_ISSUE: Final[int] = 3
+# Claude (GRADING_MODEL) checks each typed answer; verdicts are cached here per
+# card sentence + answer, so the same answer twice is never paid for twice.
+CARD_VERDICTS_FILENAME: Final[str] = "card_verdicts.jsonl"
+# A topic drill (an AI set run, a spoken drill) counts as "correct" in the
+# attempts log at this score; the exact score feeds topic accuracy.
 DRILL_PASS_SCORE: Final[float] = 0.8
-# Cloze on improved_version: which words become gaps, per topic. "to" is left
-# out of prepositions on purpose - it is mostly the infinitive marker.
-CLOZE_WORDS: Final[dict] = {
-    "articles": ("a", "an", "the"),
-    "prepositions": (
-        "about", "after", "at", "before", "by", "during", "for", "from", "in",
-        "into", "of", "on", "over", "since", "through", "under", "until", "with",
-    ),
-}
-CLOZE_MAX_GAPS: Final[int] = 15
 
 # --- «Сегодня» daily workout (Stage 3) -----------------------------------
-# The workout aims at ~10 minutes: cards, one topic drill, one live activity.
+# The workout aims at ~10 minutes: cards, one live activity, dictation.
 # Cards past WORKOUT_MAX_CARDS stay in the queue and can be done on «Занятия».
 WORKOUT_MAX_CARDS: Final[int] = 15
-WORKOUT_MINUTES_PER_CARD: Final[float] = 0.4
-WORKOUT_MINUTES_CLOZE: Final[float] = 3.0
+WORKOUT_MINUTES_PER_CARD: Final[float] = 0.5
 WORKOUT_MINUTES_MONOLOGUE: Final[float] = 3.0
 # How many days of exercise history the «История» tab shows.
 ACTIVITY_HISTORY_DAYS: Final[int] = 60
@@ -400,6 +390,22 @@ WORKOUT_MINUTES_DICTATION: Final[float] = 4.0
 # «Сложные слова» on «Прогресс»: words missed or hinted at least this often.
 DICTATION_TRICKY_MIN_MISSES: Final[int] = 2
 DICTATION_TRICKY_LIMIT: Final[int] = 20
+
+# --- Dictation translation (Haiku, well under a cent per call) ------------
+# After the dictation, a lesson can be translated part by part (English ->
+# Russian). Two explicit clicks pay for it, both on Haiku: one call cuts the
+# lesson into parts at natural breaks (decided 2026-09-26 - a model, not
+# pauses), one call per part reviews the learner's translation. Both results
+# are kept on disk. Mistakes stay in the lesson: nothing goes to the item bank.
+TRANSLATION_MODEL: Final[str] = "claude-haiku-4-5"
+TRANSLATION_SPLIT_MAX_TOKENS: Final[int] = 1_500
+TRANSLATION_REVIEW_MAX_TOKENS: Final[int] = 3_000
+# A part is this many sentences; a lesson that fits in one part needs no call.
+TRANSLATION_PART_MIN_SENTENCES: Final[int] = 5
+TRANSLATION_PART_MAX_SENTENCES: Final[int] = 15
+LESSON_PARTS_FILENAME: Final[str] = "parts.json"
+# Append-only like results.jsonl: every submitted translation with its review.
+LESSON_TRANSLATIONS_FILENAME: Final[str] = "translations.jsonl"
 
 # --- Pricing (estimates for the usage log, USD) --------------------------
 # Per million tokens: (input, output). Cache writes bill at 1.25x input,

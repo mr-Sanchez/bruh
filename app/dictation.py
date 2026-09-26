@@ -14,7 +14,9 @@ This module is the pure half of the activity and does no I/O at all:
   * `tokenize` / `normalize_word` / `grade_sentence` decide what "typed it
     right" means - the same rules the browser applies while typing, so the
     live feedback and the stored result never disagree;
-  * `tricky_words` and `lesson_progress` read the stored results back.
+  * `tricky_words` and `lesson_progress` read the stored results back;
+  * `plan_parts` turns the model's suggested breaks into the parts of the
+    translation task (the model itself lives in dictation_translation.py).
 
 Like the subtitles themselves, a sentence is never rewritten: it is shown
 exactly as the caption track spells it.
@@ -458,3 +460,59 @@ def done_on(records: Sequence[Dict[str, Any]], day: dt.date) -> int:
     return sum(
         1 for record in records if record.get("completed") and _record_day(record) == day
     )
+
+
+# ------------------------------------------------------------ translation parts
+def _even_pieces(size: int, max_size: int) -> List[int]:
+    """`size` split into the fewest near-equal pieces of at most `max_size`."""
+    pieces = -(-size // max_size)
+    base, extra = divmod(size, pieces)
+    return [base + 1 if n < extra else base for n in range(pieces)]
+
+
+def plan_parts(
+    sentence_count: int,
+    starts: Iterable[int],
+    *,
+    min_size: int = config.TRANSLATION_PART_MIN_SENTENCES,
+    max_size: int = config.TRANSLATION_PART_MAX_SENTENCES,
+) -> List[Dict[str, int]]:
+    """Cut a lesson into parts for the translation task.
+
+    `starts` are the sentence indices where the model says a new part begins.
+    Structured output guarantees their shape, not their sense, so they are
+    repaired here: strays and duplicates are dropped, a part over `max_size`
+    is cut into even pieces, one under `min_size` is merged into its shorter
+    neighbour. A lesson shorter than `min_size` stays one part. Each part is
+    {"first", "end"} - sentence indices, `end` exclusive - and together they
+    cover every sentence exactly once.
+    """
+    if sentence_count <= 0:
+        return []
+    cuts = sorted({s for s in starts if isinstance(s, int) and 0 < s < sentence_count})
+    edges = [0, *cuts, sentence_count]
+    sizes = [b - a for a, b in zip(edges, edges[1:])]
+
+    def evened(values: Sequence[int]) -> List[int]:
+        result: List[int] = []
+        for value in values:
+            result.extend(_even_pieces(value, max_size) if value > max_size else [value])
+        return result
+
+    sizes = evened(sizes)
+    # A merge can push a part over the maximum; the even cut that follows
+    # leaves pieces of at least max_size / 2 > min_size, so this terminates.
+    while len(sizes) > 1 and min(sizes) < min_size:
+        small = sizes.index(min(sizes))
+        neighbours = [n for n in (small - 1, small + 1) if 0 <= n < len(sizes)]
+        other = min(neighbours, key=lambda n: sizes[n])
+        low, high = sorted((small, other))
+        sizes[low : high + 1] = [sizes[low] + sizes[high]]
+        sizes = evened(sizes)
+
+    parts: List[Dict[str, int]] = []
+    first = 0
+    for size in sizes:
+        parts.append({"first": first, "end": first + size})
+        first += size
+    return parts

@@ -27,6 +27,7 @@ ANALYSIS = {
             "better_versions": [],
             "pattern": {"rule": "responsible for + noun", "examples": []},
             "severity": "moderate",
+            "drills": [{"russian": "Кто отвечает за релиз?", "english": "Who is responsible for the release?"}],
         }
     ],
     "vocabulary": [{"phrase": "recruiter", "meaning": "рекрутер", "example": "..."}],
@@ -105,23 +106,15 @@ class LearnerStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             learner_store.append_attempt(None, "cloze", True)
 
-    def test_practice_texts_skip_russian_and_carry_cloze_results(self) -> None:
-        english = {**ANALYSIS, "improved_version": "I talked to the recruiter at the office."}
-        russian = {**ANALYSIS, "language": "ru", "improved_version": "Я поговорил с рекрутером."}
-        write_analysed_session(self.root, "s1", dt.datetime(2026, 9, 1, 10), english)
-        write_analysed_session(self.root, "s2", dt.datetime(2026, 9, 2, 10), russian, language="ru")
-        write_analysed_session(self.root, "s3", dt.datetime(2026, 9, 3, 10), ANALYSIS)  # no text
-        learner_store.append_attempt(None, "cloze", True, topic="articles", score=1.0, session_id="s1")
-
-        plain = learner_store.practice_texts()
-        self.assertEqual([t["session_id"] for t in plain], ["s1"])
-        self.assertNotIn("segments", plain[0])
-
-        (articles,) = learner_store.practice_texts("articles")
-        self.assertEqual(articles["gaps"], 2)
-        self.assertEqual((articles["attempts"], articles["best_score"]), (1, 1.0))
-        (prepositions,) = learner_store.practice_texts("prepositions")
-        self.assertEqual((prepositions["gaps"], prepositions["attempts"]), (1, 0))
+    def test_card_verdicts_are_cached_by_sentence_and_normalised_answer(self) -> None:
+        russian = "Кто отвечает за релиз?"
+        self.assertIsNone(learner_store.cached_card_verdict(russian, "Who answers for release"))
+        verdict = {"correct": False, "comment": "Нужно responsible for.", "corrected": "x"}
+        learner_store.store_card_verdict(
+            "fix-1", russian, "Who answers for release", verdict, model="m", cost=0.001
+        )
+        self.assertEqual(learner_store.cached_card_verdict(russian, "who answers for release?"), verdict)
+        self.assertIsNone(learner_store.cached_card_verdict("Другое предложение.", "Who answers for release"))
 
     def test_claude_cost_estimate(self) -> None:
         usage = {

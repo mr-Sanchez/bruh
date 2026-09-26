@@ -1,6 +1,6 @@
 """Claude-generated exercise sets (Stage 5): generation and grading.
 
-The free drills (cards, cloze) can only reuse sentences the learner already
+The free drills can only reuse sentences the learner already
 spoke. A set adds *new* sentences on the same weak spot: 8-10 exercises on one
 topic, built around the learner's own mistakes and rules on it, in an IT /
 work context. Three kinds, easy to hard:

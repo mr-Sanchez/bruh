@@ -45,6 +45,7 @@ from app.analyzer import (
     ImageInput,
     MissingAnthropicApiKeyError,
 )
+from app.dictation_translation import LessonTranslator
 from app.exercise_sets import ExerciseSetGenerator, TranslationAnswer
 from app.transcriber import DeepgramTranscriber, TranscriptionError
 from app.utils import Session
@@ -64,6 +65,7 @@ TranscriberFactory = Callable[[config.LanguageProfile], DeepgramTranscriber]
 AnalyzerFactory = Callable[[], ClaudeAnalyzer]
 GeneratorFactory = Callable[[], ExerciseSetGenerator]
 FetcherFactory = Callable[[], YouTubeFetcher]
+TranslatorFactory = Callable[[], LessonTranslator]
 
 
 # ------------------------------------------------------------- dependencies
@@ -95,6 +97,15 @@ def get_fetcher_factory() -> FetcherFactory:
 
     def factory() -> YouTubeFetcher:
         return create_fetcher()
+
+    return factory
+
+
+def get_translator_factory() -> TranslatorFactory:
+    """Haiku for the dictation's translation task (splitting and reviewing)."""
+
+    def factory() -> LessonTranslator:
+        return LessonTranslator(config.get_anthropic_api_key())
 
     return factory
 
@@ -508,7 +519,6 @@ def get_topics() -> Dict[str, Any]:
                     {"title": title, "url": url}
                     for title, url in config.TOPIC_RESOURCES.get(key, ())
                 ],
-                "has_cloze": key in config.CLOZE_WORDS,
             }
             for key, info in progress_store.TOPIC_TAXONOMY.items()
         ]
@@ -547,6 +557,8 @@ def get_learner_items(
     items = []
     for item_id, item in bank["items"].items():
         state = states[item_id]
+        if learner_model.is_retired(item):
+            continue
         if due_only and not state.is_due(today):
             continue
         if topic is not None and item.get("topic") != topic:
@@ -600,17 +612,72 @@ def post_learner_attempt(body: AttemptRequest) -> Dict[str, Any]:
     }
 
 
-@router.get("/learner/texts")
-def get_learner_texts(topic: Optional[str] = None) -> Dict[str, Any]:
-    """improved_version texts for cloze drills; with topic, their gaps too."""
-    if topic is not None and topic not in config.CLOZE_WORDS:
-        raise HTTPException(status_code=404, detail="No cloze drill for this topic.")
-    return {"topic": topic, "texts": learner_store.practice_texts(topic)}
+class CardCheckRequest(BaseModel):
+    """The answer to one card sentence; `drill` is the index the card showed."""
+
+    drill: int = Field(ge=0, le=50)
+    answer: str = Field(default="", max_length=1000)
+
+
+@router.post("/learner/cards/{item_id}/check")
+def check_card(
+    item_id: str,
+    body: CardCheckRequest,
+    generator_factory: GeneratorFactory = Depends(get_generator_factory),
+) -> Dict[str, Any]:
+    """Check a translation card's answer: Claude (Haiku) decides whether it
+    says the sentence correctly with the construction the card trains.
+
+    Only the check - the attempt is logged by POST /learner/attempts as for
+    any card, so the learner can still overrule a verdict. An empty answer or
+    one that matches the reference needs no call, and a verdict on the same
+    answer to the same sentence is reused from the cache.
+    """
+    bank = learner_store.load_item_bank()
+    item = bank["items"].get(item_id)
+    if item is None or learner_model.is_retired(item):
+        raise HTTPException(status_code=404, detail="Unknown card.")
+    drills = (item.get("content") or {}).get("drills") or []
+    if item.get("kind") != learner_model.KIND_FIX or body.drill >= len(drills):
+        raise HTTPException(status_code=400, detail="This card has no such sentence.")
+    drill = drills[body.drill]
+    answer = body.answer.strip()
+    if not answer:
+        return {"correct": False, "comment": "Ответа нет.", "corrected": "", "graded_by": "empty"}
+    if learner_model.answer_matches(answer, [drill["english"]]):
+        return {"correct": True, "comment": "", "corrected": answer, "graded_by": "match"}
+    cached = learner_store.cached_card_verdict(drill["russian"], answer)
+    if cached is not None:
+        return {**cached, "graded_by": "cache"}
+
+    content = item.get("content") or {}
+    pending = TranslationAnswer(
+        exercise_id=item_id,
+        russian=drill["russian"],
+        reference=drill["english"],
+        focus=content.get("focus") or f"the fix of: {content.get('correction', '')}",
+        answer=answer,
+    )
+    topic = learner_store.topic_info(item.get("topic") or "other")
+    try:
+        graded = generator_factory().grade(topic, [pending])
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    usage = learner_store.record_claude_usage("card_grading", graded.call.model, graded.call.usage)
+    verdict = graded.verdicts.get(item_id)
+    if verdict is None:
+        raise HTTPException(status_code=502, detail="Claude не проверил ответ. Попробуйте ещё раз.")
+    learner_store.store_card_verdict(
+        item_id, drill["russian"], answer, verdict, model=graded.call.model, cost=usage["cost_usd"]
+    )
+    return {**verdict, "graded_by": "claude", "cost_usd": usage["cost_usd"]}
 
 
 @router.get("/learner/today")
 def get_learner_today() -> Dict[str, Any]:
-    """The «Сегодня» workout: cards, a topic drill and a live activity."""
+    """The «Сегодня» workout: cards, a live activity, dictation, extras."""
     return learner_store.today_workout()
 
 
@@ -651,8 +718,10 @@ def get_talk_series() -> Dict[str, Any]:
 # -------------------------------------------------------------- /dictation
 # Listening dictation (Stage 7): a YouTube video becomes a lesson - its audio
 # plus the sentences of its own subtitle track, typed word by word. Free by
-# construction: nothing here calls Deepgram or Claude, and a video without
-# usable subtitles is refused rather than transcribed (decided 2026-09-20).
+# construction: the dictation itself calls neither Deepgram nor Claude, and a
+# video without usable subtitles is refused rather than transcribed (decided
+# 2026-09-20). Only the optional translation task after it costs Haiku calls
+# (cut into parts, review a translation), each on an explicit click.
 _LESSON_ID_PATTERN = r"^[A-Za-z0-9_-]{6,20}$"
 
 
@@ -784,6 +853,94 @@ def post_lesson_result(lesson_id: str, body: SentenceResultRequest) -> Dict[str,
     )
     results = dictation_store.lesson_results(lesson_id)
     return {"result": record, "progress": dictation.lesson_progress(len(sentences), results)}
+
+
+class TranslationRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=8_000)
+
+
+@router.post("/dictation/lessons/{lesson_id}/parts")
+def split_lesson(
+    lesson_id: str,
+    force: bool = False,
+    translator_factory: TranslatorFactory = Depends(get_translator_factory),
+) -> Dict[str, Any]:
+    """Cut a lesson into translation parts (one Haiku call, on a click).
+
+    Cached like an analysis: a lesson that is already cut - or short enough to
+    be one part - is returned as is unless `force` asks for a new cut.
+    """
+    lesson = _lesson_or_404(lesson_id)
+    if not force and dictation_store.resolve_parts(lesson) is not None:
+        return dictation_store.translation_payload(lesson)
+    sentences = lesson.get("sentences") or []
+    try:
+        result = translator_factory().split([s["text"] for s in sentences])
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    learner_store.record_claude_usage(
+        "dictation_split", result.call.model, result.call.usage, session_id=lesson["id"]
+    )
+    parts = dictation.plan_parts(len(sentences), result.starts)
+    dictation_store.save_parts(lesson, parts, model=result.call.model, starts=result.starts)
+    logger.info("Lesson %s cut into %d parts", lesson["id"], len(parts))
+    return dictation_store.translation_payload(lesson)
+
+
+@router.post("/dictation/lessons/{lesson_id}/parts/{part}/translation", status_code=201)
+def post_part_translation(
+    lesson_id: str,
+    part: int,
+    body: TranslationRequest,
+    translator_factory: TranslatorFactory = Depends(get_translator_factory),
+) -> Dict[str, Any]:
+    """Store the learner's translation of one part and have Haiku review it.
+
+    The text is saved before Claude is asked, so a missing key or a failed
+    call never loses it; the same text sent again reuses the stored review.
+    """
+    lesson = _lesson_or_404(lesson_id)
+    parts = dictation_store.resolve_parts(lesson)
+    if parts is None:
+        raise HTTPException(status_code=409, detail="Сначала разбейте урок на части.")
+    if not 0 <= part < len(parts):
+        raise HTTPException(status_code=404, detail="Unknown part.")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Перевод пустой.")
+
+    previous = dictation_store.latest_translations(lesson["id"]).get(part)
+    if previous and previous.get("text") == text and previous.get("review"):
+        return {"translation": previous, "cached": True}
+
+    try:
+        result = translator_factory().review(
+            dictation_store.part_source(lesson, parts[part]),
+            text,
+            subtitle_language=lesson.get("subtitle_language"),
+        )
+    except (MissingAnthropicApiKeyError, AnalysisError) as exc:
+        dictation_store.append_translation(
+            lesson["id"], {"part": part, "text": text, "review": None}
+        )
+        status = 400 if isinstance(exc, MissingAnthropicApiKeyError) else 502
+        raise HTTPException(status_code=status, detail=str(exc))
+    usage = learner_store.record_claude_usage(
+        "dictation_translation", result.call.model, result.call.usage, session_id=lesson["id"]
+    )
+    record = dictation_store.append_translation(
+        lesson["id"],
+        {
+            "part": part,
+            "text": text,
+            "review": result.review,
+            "model": result.call.model,
+            "cost_usd": usage["cost_usd"],
+        },
+    )
+    return {"translation": record, "cached": False}
 
 
 @router.delete("/dictation/lessons/{lesson_id}")

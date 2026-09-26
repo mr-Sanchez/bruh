@@ -273,30 +273,7 @@ button.success { background: var(--success); }
 .progress-bar { height: 4px; border-radius: 999px; background: var(--border); overflow: hidden; }
 .progress-bar > div { height: 100%; background: var(--accent); }
 
-.chip {
-  background: var(--accent-weak);
-  color: var(--accent);
-  padding: 6px 12px;
-  margin: 4px;
-  font-weight: 500;
-}
-.scramble-answer {
-  min-height: 48px;
-  padding: 4px;
-  margin-bottom: 8px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-}
-.scramble-answer .chip { background: var(--surface); border-color: var(--accent); }
-.scramble-pool { padding: 4px 0; }
-
-.gap-sentence, .cloze-text { line-height: 2.1; }
-.cloze-text {
-  padding: 12px 16px;
-  background: var(--bg);
-  border-radius: 8px;
-  border: 1px solid var(--border);
-}
+.gap-sentence { line-height: 2.1; }
 .gap-input {
   display: inline-block;
   width: 10ch;
@@ -307,9 +284,6 @@ button.success { background: var(--success); }
   border-color: var(--accent);
   border-radius: 4px 4px 0 0;
 }
-.gap-input.gap-ok { border-color: var(--success); color: var(--success); }
-.gap-input.gap-bad { border-color: var(--danger); color: var(--danger); text-decoration: line-through; }
-.gap-fix { color: var(--success); font-weight: 700; margin-right: 4px; }
 
 .verdict { font-weight: 700; margin: 12px 0 6px; }
 .verdict-ok { color: var(--success); }
@@ -323,6 +297,14 @@ button.success { background: var(--success); }
   border-top: 1px solid var(--border);
 }
 .card-back .phrase { font-weight: 600; }
+.card-hint { margin: 0 0 10px; color: var(--text-muted); font-size: 0.95rem; }
+.card-hint summary { cursor: pointer; width: fit-content; }
+.card-source {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.card-source .quote { margin: 4px 0; }
 
 .deep-links { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 0.9rem; }
 
@@ -616,6 +598,23 @@ a.activity:hover { border-color: var(--accent); }
 .dictation-verdict.is-clean { color: var(--success); font-weight: 600; }
 .dictation-verdict.is-ok { color: var(--text); }
 .dictation-help { font-size: 0.82rem; }
+
+/* Translation task under a lesson: parts, the source text, Haiku's review. */
+.translation-part { border-top: 1px solid var(--border); padding: 12px 0; }
+.translation-part:first-child { border-top: 0; }
+.translation-part-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.translation-source {
+  margin: 12px 0 8px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-weak);
+  border-radius: 0 8px 8px 0;
+  line-height: 1.55;
+}
+.translation-part textarea { width: 100%; resize: vertical; line-height: 1.5; }
+.translation-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+.translation-review { margin-top: 12px; }
+.translation-error { min-height: 1.2em; color: var(--danger); }
 .tricky-words { list-style: none; margin: 0; padding: 0; }
 .tricky-words li { padding: 6px 0; border-bottom: 1px solid var(--border); }
 .tricky-words .phrase { font-weight: 600; }

@@ -1,8 +1,10 @@
-// Drill runners for the free ($0) exercises: Leitner cards and cloze texts.
-// Everything is checked here in the browser; each answer is written to the
-// attempts log (POST /api/learner/attempts), which moves the card's Leitner box
-// and topic accuracy on the server. The exercise format of a card is chosen by
-// the server (learner_model.card_exercise) - this file only renders it.
+// Drill runners: Leitner cards and AI exercise sets. Each card answer is
+// written to the attempts log (POST /api/learner/attempts), which moves the
+// card's Leitner box and topic accuracy on the server. The exercise format of a
+// card is chosen by the server (learner_model.card_exercise) - this file only
+// renders it. A mistake card is a new Russian sentence to say in English; its
+// free-text answer is checked by Claude (POST /api/learner/cards/<id>/check),
+// phrase gaps are checked here in the browser, the rest is self-graded.
 const Drill = (() => {
   // ------------------------------------------------------------ checking
   // Case, quotes, punctuation and spacing do not count; apostrophes do
@@ -81,15 +83,6 @@ const Drill = (() => {
       </div>`;
   }
 
-  function shuffle(list) {
-    const copy = list.slice();
-    for (let i = copy.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [copy[i], copy[j]] = [copy[j], copy[i]];
-    }
-    return copy;
-  }
-
   // Replaces the [data-role="buttons"] row with [label, className, handler]
   // buttons and focuses the first, so Enter moves the drill on.
   function setButtons(container, list) {
@@ -129,14 +122,17 @@ const Drill = (() => {
 
   function cardPrompt(item) {
     const c = item.content || {};
-    const type = item.exercise.type;
-    if (item.kind === "fix") {
-      const task = {
-        scramble: "Соберите исправленный вариант из слов",
-        type: "Напишите исправленный вариант",
-        self: "Скажите или напишите исправленный вариант, затем проверьте себя",
-      }[type];
-      return `<p class="quote">❌ «${escapeHtml(c.quote)}»</p><p class="task">${task}</p>`;
+    const ex = item.exercise;
+    const type = ex.type;
+    if (type === "translate") {
+      return `
+        <p class="task">Скажите по-английски</p>
+        <p class="set-russian">${escapeHtml(ex.russian)}</p>
+        ${
+          ex.focus
+            ? `<details class="card-hint"><summary>Подсказка</summary>${escapeHtml(ex.focus)}</details>`
+            : ""
+        }`;
     }
     if (item.kind === "pattern") {
       return `
@@ -151,32 +147,32 @@ const Drill = (() => {
 
   function cardAnswerArea(item) {
     const ex = item.exercise;
-    if (ex.type === "scramble") {
-      const tokens = ex.answer.split(/\s+/).filter(Boolean);
-      let order = shuffle(tokens);
-      for (let tries = 0; tries < 5 && tokens.length > 1 && order.join(" ") === tokens.join(" "); tries++) {
-        order = shuffle(tokens);
-      }
-      return `
-        <div class="scramble-answer" data-role="answer"></div>
-        <div class="scramble-pool" data-role="pool">
-          ${order.map((t) => `<button type="button" class="chip">${escapeHtml(t)}</button>`).join("")}
-        </div>`;
-    }
     if (ex.type === "gap") {
       return `
         <p class="gap-sentence">${escapeHtml(ex.before)}<input class="gap-input" data-role="input"
           autocomplete="off" spellcheck="false" />${escapeHtml(ex.after)}</p>`;
     }
-    const placeholder = ex.type === "self" ? "Необязательно: запишите свой вариант" : "Ваш вариант";
+    const placeholder = {
+      self: "Необязательно: запишите свой вариант",
+      translate: "Ваш перевод",
+    }[ex.type] || "Ваш вариант";
     return `<textarea data-role="input" rows="2" placeholder="${placeholder}" spellcheck="false"></textarea>`;
   }
 
-  function cardBack(item) {
+  // Where a mistake card came from: the learner's own mistake, shown only
+  // after the answer - the card itself is a new sentence on the same rule.
+  function cardSource(item) {
     const c = item.content || {};
-    if (item.kind === "fix") {
-      const better = (c.better_versions || []).filter(Boolean);
-      return `
+    const first = (item.occurrences || [])[0] || {};
+    const date = escapeHtml((first.at || "").slice(0, 10));
+    const origin = first.session_id
+      ? `Из вашей записи от ${date} · <a href="#/session/${encodeURIComponent(first.session_id)}">открыть</a>`
+      : `Из AI-набора от ${date}`;
+    const better = (c.better_versions || []).filter(Boolean);
+    return `
+      <div class="card-source">
+        <p class="muted">${origin}</p>
+        <p class="quote">❌ «${escapeHtml(c.quote)}»</p>
         <p class="correction">✅ ${escapeHtml(c.correction)}</p>
         ${c.explanation ? `<p>${escapeHtml(c.explanation)}</p>` : ""}
         ${
@@ -184,8 +180,13 @@ const Drill = (() => {
             ? `<div class="better-versions"><span class="muted">Проще / естественнее:</span>
                  <ul>${better.map((v) => `<li>${escapeHtml(v)}</li>`).join("")}</ul></div>`
             : ""
-        }`;
-    }
+        }
+      </div>`;
+  }
+
+  function cardBack(item) {
+    const c = item.content || {};
+    if (item.kind === "fix") return cardSource(item);
     if (item.kind === "pattern") {
       return `<div class="pattern-box">
         ${(c.examples || []).map((e) => `<div class="pattern-example">${escapeHtml(e)}</div>`).join("")}
@@ -226,34 +227,65 @@ const Drill = (() => {
           if (slot) slot.textContent = label;
         });
       }
-      if (item.exercise.type === "scramble") wireScramble(item);
+      if (item.exercise.type === "translate") askTranslate(item);
       else if (item.exercise.type === "self") askSelf(item);
       else askTyped(item);
     }
 
     const buttons = (list) => setButtons(container, list);
 
-    function wireScramble(item) {
-      const answerBox = container.querySelector('[data-role="answer"]');
-      const pool = container.querySelector('[data-role="pool"]');
-      const move = (event) => {
-        const chip = event.target.closest(".chip");
-        if (!chip) return;
-        (chip.parentElement === pool ? answerBox : pool).appendChild(chip);
+    // Free text, so Claude checks it. If the check fails (no key, network),
+    // the learner compares with the reference and grades the answer.
+    function askTranslate(item) {
+      const input = container.querySelector('[data-role="input"]');
+      const result = container.querySelector('[data-role="result"]');
+      const ex = item.exercise;
+      const check = async () => {
+        if (input.readOnly) return;
+        const answer = input.value;
+        input.readOnly = true;
+        buttons([]);
+        result.innerHTML = `<p class="muted">Claude проверяет…</p>`;
+        let verdict;
+        try {
+          verdict = await Api.checkCard(item.id, ex.drill, answer);
+        } catch (err) {
+          result.innerHTML = `
+            <p class="verdict-bad">Не удалось проверить: ${escapeHtml(err.message)}</p>
+            <p><span class="muted">Образец:</span> ${escapeHtml(ex.reference)}</p>
+            ${cardSource(item)}
+            <p class="muted">Сравните с образцом и оцените себя сами.</p>`;
+          buttons([
+            ["Верно", "success", () => record(item, true, answer)],
+            ["Неверно", "danger", () => record(item, false, answer)],
+          ]);
+          return;
+        }
+        const ok = !!verdict.correct;
+        const fixed =
+          !ok && verdict.corrected && normalize(verdict.corrected) !== normalize(answer)
+            ? `<p class="correction">✅ ${escapeHtml(verdict.corrected)}</p>`
+            : "";
+        const sameAsReference = normalize(answer) === normalize(ex.reference);
+        result.innerHTML = `
+          <p class="verdict ${ok ? "verdict-ok" : "verdict-bad"}">${ok ? "Верно!" : "Не совсем"}</p>
+          ${verdict.comment ? `<p>${escapeHtml(verdict.comment)}</p>` : ""}
+          ${fixed}
+          ${sameAsReference ? "" : `<p><span class="muted">Образец:</span> ${escapeHtml(ex.reference)}</p>`}
+          ${cardSource(item)}`;
+        const next = [["Дальше", "", () => record(item, ok, answer)]];
+        // Claude can be wrong too; overruling it is still one attempt in the log.
+        if (!ok) next.push(["Засчитать как верный", "secondary", () => record(item, true, answer)]);
+        buttons(next);
       };
-      answerBox.addEventListener("click", move);
-      pool.addEventListener("click", move);
-      buttons([
-        [
-          "Проверить",
-          "",
-          () => {
-            const answer = Array.from(answerBox.querySelectorAll(".chip")).map((c) => c.textContent).join(" ");
-            answerBox.style.pointerEvents = pool.style.pointerEvents = "none";
-            judged(item, answer, matches(answer, [item.exercise.answer]), item.exercise.answer);
-          },
-        ],
-      ]);
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey && !input.readOnly) {
+          event.preventDefault();
+          check();
+        }
+      });
+      buttons([["Проверить", "", check]]);
+      input.focus();
     }
 
     function askTyped(item) {
@@ -340,89 +372,6 @@ const Drill = (() => {
     }
 
     show();
-  }
-
-  // ------------------------------------------------------------- cloze
-  const CLOZE_TITLES = { articles: "Артикли", prepositions: "Предлоги" };
-
-  // One improved_version text with function words blanked out. The whole text
-  // is one topic attempt; its share of right gaps is the score.
-  function runCloze(container, text, topic, { onFinish, context }) {
-    let gapIndex = 0;
-    const body = text.segments
-      .map((segment) => {
-        if (segment.gap === undefined) return escapeHtml(segment.text);
-        const i = gapIndex++;
-        const width = Math.max(3, segment.gap.length + 1);
-        return `<input class="gap-input" data-gap="${i}" style="width:${width + 1}ch"
-          autocomplete="off" spellcheck="false" aria-label="Пропуск ${i + 1}" />`;
-      })
-      .join("");
-    const answers = text.segments.filter((s) => s.gap !== undefined).map((s) => s.gap);
-
-    container.innerHTML = `
-      <div class="card drill-card">
-        <div class="drill-head">
-          <h2>Пропуски: ${escapeHtml(CLOZE_TITLES[topic] || topic)}</h2>
-          <span class="muted">${escapeHtml(text.recorded_at.slice(0, 10))} · пропусков: ${answers.length}</span>
-        </div>
-        <p class="muted">Это ваша «улучшенная версия» монолога. Впишите пропущенные ${
-          topic === "articles" ? "артикли (a / an / the)" : "предлоги"
-        }.</p>
-        <div class="cloze-text">${body}</div>
-        <div data-role="result"></div>
-        <div class="button-row" data-role="buttons">
-          <button data-role="check">Проверить</button>
-          <button class="secondary" data-role="back">Назад</button>
-        </div>
-      </div>`;
-
-    const inputs = Array.from(container.querySelectorAll(".gap-input"));
-    inputs.forEach((input, i) => {
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          (inputs[i + 1] || container.querySelector('[data-role="check"]')).focus();
-        }
-      });
-    });
-    if (inputs[0]) inputs[0].focus();
-    container.querySelector('[data-role="back"]').addEventListener("click", onFinish);
-
-    const checkButton = container.querySelector('[data-role="check"]');
-    checkButton.addEventListener("click", async () => {
-      checkButton.disabled = true;
-      let right = 0;
-      inputs.forEach((input, i) => {
-        const ok = normalize(input.value) === normalize(answers[i]);
-        if (ok) right += 1;
-        input.readOnly = true;
-        input.classList.add(ok ? "gap-ok" : "gap-bad");
-        if (!ok) {
-          input.insertAdjacentHTML("afterend", `<span class="gap-fix">${escapeHtml(answers[i])}</span>`);
-        }
-      });
-      const score = answers.length ? right / answers.length : 1;
-      const result = container.querySelector('[data-role="result"]');
-      result.innerHTML = `<p class="drill-score">${right} из ${answers.length} верно</p>`;
-      try {
-        await Api.postAttempt({
-          topic,
-          exercise: "cloze",
-          score,
-          session_id: text.session_id,
-          context,
-          answer: inputs.map((input) => input.value.trim() || "_").join(" | ").slice(0, 4000),
-        });
-      } catch (err) {
-        result.insertAdjacentHTML(
-          "beforeend",
-          `<p class="verdict-bad">Не удалось сохранить результат: ${escapeHtml(err.message)}</p>`
-        );
-      }
-      checkButton.remove();
-      container.querySelector('[data-role="back"]').textContent = "Готово";
-    });
   }
 
   // ------------------------------------------------------ AI exercise set
@@ -625,5 +574,5 @@ const Drill = (() => {
     show();
   }
 
-  return { runCards, runCloze, runSet, normalize, matches, wordDiff, CLOZE_TITLES };
+  return { runCards, runSet, normalize, matches, wordDiff };
 })();

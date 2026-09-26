@@ -14,6 +14,9 @@ alternatives and the reusable construction behind the fix, followed by the
 words the speaker was searching for, an improved retelling of the whole
 monologue, a handful of takeaways and per-skill scores (1-10). The retelling
 is a separate field of the analysis - the stored transcript is never touched.
+Each English mistake also carries a few new Russian -> English practice
+sentences on the same construction: the learner's cards are built from those
+(decided 2026-09-26), so a review never depends on remembering the recording.
 
 A picture description (Stage 4) is the same call with the picture attached:
 the language feedback is identical, plus what the speaker did not mention
@@ -56,7 +59,8 @@ Severity = Literal["minor", "moderate", "major"]
 # summary + issues(topic, quote, explanation, correction, severity); the
 # frontend still renders v1 files, it just shows fewer sections. v3 adds
 # kind / input_mode and, for pictures, not_mentioned + scene_vocabulary.
-ANALYSIS_SCHEMA_VERSION: Final[int] = 3
+# v4 adds issues[].drills - the practice sentences cards are built from.
+ANALYSIS_SCHEMA_VERSION: Final[int] = 4
 
 SCORE_MIN: Final[int] = 1
 SCORE_MAX: Final[int] = 10
@@ -69,6 +73,16 @@ class Pattern(BaseModel):
     examples: List[str] = Field(default_factory=list)
 
 
+class Drill(BaseModel):
+    """A new sentence that needs the construction the speaker got wrong:
+    Russian to say, English to check against. Cards are built from these, not
+    from the quote itself - a verbatim fragment seen a week later has no
+    context left, and recalling it trains memory of one text, not the rule."""
+
+    russian: str
+    english: str
+
+
 class Issue(BaseModel):
     """One tagged mistake, quoted from the transcript, with a Russian fix."""
 
@@ -79,6 +93,7 @@ class Issue(BaseModel):
     better_versions: List[str] = Field(default_factory=list)
     pattern: Optional[Pattern] = None
     severity: Severity
+    drills: List[Drill] = Field(default_factory=list)
 
 
 class KeyPhrase(BaseModel):
@@ -227,6 +242,16 @@ written, do not invent new keys):
   Use "other" sparingly, only when nothing else fits.
 - `severity`: "minor" (barely noticeable), "moderate" (a native listener \
 would notice), "major" (impedes understanding, or is systematic/frequent).
+- `drills`: {drills} practice sentences for this mistake, used later as \
+flashcards "say it in English". Each is a NEW situation (work, IT, everyday \
+life - vary people and settings), never the speaker's own sentence or a \
+paraphrase of it, and needs exactly the construction or word choice the \
+speaker got wrong - so saying it right means having learned the fix. \
+`russian`: one natural, unambiguous Russian sentence of 5-14 words whose \
+natural English translation uses that construction. `english`: that natural \
+English translation, at the speaker's level. Leave `drills` empty when the \
+quote is not English, or when the topic is "filler_words_fluency" or \
+"repetition_self_correction" (delivery, not something to recall).
 - Look for, where present: verb tense errors, article errors, word order, \
 preposition errors, subject-verb agreement, wrong word choice / false \
 friends, run-on or fragmented sentences, filler words / hesitations, \
@@ -333,7 +358,10 @@ class ClaudeAnalyzer:
             raise AnalysisError("There is no transcript to analyze yet.")
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-            taxonomy=_topic_taxonomy_lines(), score_min=SCORE_MIN, score_max=SCORE_MAX
+            taxonomy=_topic_taxonomy_lines(),
+            score_min=SCORE_MIN,
+            score_max=SCORE_MAX,
+            drills=config.DRILLS_PER_ISSUE,
         )
         if image is not None:
             system_prompt += PICTURE_PROMPT

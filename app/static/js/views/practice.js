@@ -1,6 +1,6 @@
 // «Занятия»: every activity, plus the free ($0) drills.
-//   #/practice          - hub: activities, today's cards, cloze texts, topics
-//   #/practice/<topic>  - one topic: its cards, its cloze drill, reference links
+//   #/practice          - hub: activities, today's cards, topics
+//   #/practice/<topic>  - one topic: its cards, AI sets, reference links
 // Cards come from the learner model (daily queue / due items of a topic);
 // drills themselves run in js/drill.js.
 window.Views = window.Views || {};
@@ -25,19 +25,11 @@ Views.practice = (() => {
 
   // ---------------------------------------------------------------- hub
   async function renderHub(container) {
-    const [queue, mastery, topicsData, usage] = await Promise.all([
+    const [queue, mastery, usage] = await Promise.all([
       Api.getQueue(),
       Api.getLearnerTopics(),
-      Api.getTopics(),
       Api.getUsage().catch(() => null),
     ]);
-    const clozeTopics = topicsData.topics.filter((t) => t.has_cloze).map((t) => t.key);
-    const clozeTexts = {};
-    await Promise.all(
-      clozeTopics.map(async (key) => {
-        clozeTexts[key] = (await Api.getPracticeTexts(key)).texts;
-      })
-    );
 
     const cards = queue.reviews.concat(queue.new);
     container.innerHTML = `
@@ -45,10 +37,6 @@ Views.practice = (() => {
       <div class="card">
         <h2>Карточки на сегодня</h2>
         ${renderQueueSummary(queue, cards.length)}
-      </div>
-      <div class="card">
-        <h2>Пропуски в тексте</h2>
-        ${renderClozeTable(clozeTopics, clozeTexts)}
       </div>
       <div class="card">
         <h2>Тренажёры по темам</h2>
@@ -65,7 +53,6 @@ Views.practice = (() => {
         })
       );
     }
-    wireCloze(container, clozeTexts, () => rerender());
   }
 
   // Live activities. Each price is the real average from the usage log, so
@@ -124,58 +111,6 @@ Views.practice = (() => {
       <div class="button-row"><button data-role="start-daily">Начать (${total})</button></div>`;
   }
 
-  function renderClozeTable(topics, textsByTopic) {
-    const sessions = [];
-    const seen = new Set();
-    topics.forEach((topic) =>
-      (textsByTopic[topic] || []).forEach((text) => {
-        if (!seen.has(text.session_id)) {
-          seen.add(text.session_id);
-          sessions.push(text);
-        }
-      })
-    );
-    if (!sessions.length) {
-      return `<p class="muted">Нужен хотя бы один проанализированный английский монолог — упражнение строится на его «улучшенной версии».</p>`;
-    }
-    return `
-      <p class="muted">Текст — «улучшенная версия» вашего монолога с пропущенными служебными словами.</p>
-      <ul class="topic-list">
-        ${sessions
-          .map(
-            (s) => `
-          <li class="topic-row">
-            <div>
-              <strong>${escapeHtml(s.recorded_at.slice(0, 16).replace("T", " "))}</strong><br/>
-              <span class="topic-meta">${escapeHtml(s.text.slice(0, 90))}…</span>
-            </div>
-            <div class="button-row compact">
-              ${topics.map((topic) => clozeButton(topic, textsByTopic[topic], s.session_id)).join("")}
-            </div>
-          </li>`
-          )
-          .join("")}
-      </ul>`;
-  }
-
-  function clozeButton(topic, texts, sessionId) {
-    const text = (texts || []).find((t) => t.session_id === sessionId);
-    if (!text || !text.gaps) return "";
-    const best = text.best_score == null ? "" : ` · ${Math.round(text.best_score * 100)}%`;
-    return `<button class="secondary" data-cloze-topic="${topic}" data-cloze-session="${escapeHtml(sessionId)}">
-      ${escapeHtml(Drill.CLOZE_TITLES[topic] || topic)}${best}</button>`;
-  }
-
-  function wireCloze(container, textsByTopic, onFinish) {
-    container.querySelectorAll("[data-cloze-topic]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const topic = button.dataset.clozeTopic;
-        const text = textsByTopic[topic].find((t) => t.session_id === button.dataset.clozeSession);
-        Drill.runCloze(container, text, topic, { onFinish });
-      });
-    });
-  }
-
   function renderTopicList(rows) {
     const shown = rows.filter((row) => row.items || row.weakness_score);
     if (!shown.length) {
@@ -212,9 +147,7 @@ Views.practice = (() => {
       label: topicKey,
       description: "",
       resources: [],
-      has_cloze: false,
     };
-    const texts = topic.has_cloze ? (await Api.getPracticeTexts(topicKey)).texts : [];
     // Topics a set cannot train (fillers, "other") answer 400: no set card.
     const sets = await Api.listSets(topicKey).catch(() => null);
     const due = itemsData.items;
@@ -242,15 +175,7 @@ Views.practice = (() => {
             : `<p class="muted">${allItems.count ? "Сейчас повторять нечего — карточки вернутся по графику." : "По этой теме карточек пока нет."}</p>`
         }
       </div>
-      ${sets ? `<div class="card" data-role="sets">${renderSets(sets)}</div>` : ""}
-      ${
-        topic.has_cloze
-          ? `<div class="card">
-               <h2>Пропуски в тексте</h2>
-               ${renderClozeTable([topicKey], { [topicKey]: texts })}
-             </div>`
-          : ""
-      }`;
+      ${sets ? `<div class="card" data-role="sets">${renderSets(sets)}</div>` : ""}`;
     if (sets) wireSets(container, topicKey);
 
     const start = container.querySelector('[data-role="start-topic"]');
@@ -263,7 +188,6 @@ Views.practice = (() => {
         })
       );
     }
-    wireCloze(container, { [topicKey]: texts }, () => rerender(topicKey));
   }
 
   // ------------------------------------------------------ AI exercise sets

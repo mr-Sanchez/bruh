@@ -6,6 +6,10 @@ One lesson is one directory under data/dictation/<video id>/:
     audio.<ext>     the audio as YouTube served it - never re-encoded
     subtitles.vtt   the caption track it was built from, kept verbatim
     results.jsonl   append-only, AUTHORITATIVE: every dictated sentence
+    parts.json      the lesson cut into translation parts (one paid Haiku call)
+    translations.jsonl
+                    append-only: every submitted translation with its review
+                    (paid for, like an analysis - not rebuildable)
 
 `results.jsonl` is to a lesson what attempts.jsonl is to the learner model:
 it is never rewritten or truncated, and everything shown about progress
@@ -46,6 +50,14 @@ def _meta_path(lesson_id: str) -> Path:
 
 def _results_path(lesson_id: str) -> Path:
     return lesson_dir(lesson_id) / config.LESSON_RESULTS_FILENAME
+
+
+def _parts_path(lesson_id: str) -> Path:
+    return lesson_dir(lesson_id) / config.LESSON_PARTS_FILENAME
+
+
+def _translations_path(lesson_id: str) -> Path:
+    return lesson_dir(lesson_id) / config.LESSON_TRANSLATIONS_FILENAME
 
 
 def audio_path(lesson: Dict[str, Any]) -> Optional[Path]:
@@ -210,6 +222,94 @@ def lesson_summary(lesson: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# -------------------------------------------------------------- translation
+def resolve_parts(lesson: Dict[str, Any]) -> Optional[List[Dict[str, int]]]:
+    """The lesson's translation parts: the saved cut, or - for a lesson short
+    enough to be one part - that single part, which needs no model call.
+    None means the lesson still has to be split.
+
+    A saved cut is trusted only while it matches the lesson's sentences, so a
+    re-import that changed them can never point a part at the wrong text.
+    """
+    count = len(lesson.get("sentences") or [])
+    path = _parts_path(lesson["id"])
+    if path.is_file():
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = None
+        parts = saved.get("parts") if isinstance(saved, dict) else None
+        if isinstance(parts, list) and saved.get("sentence_count") == count and parts:
+            return [{"first": int(p["first"]), "end": int(p["end"])} for p in parts]
+    if 0 < count <= config.TRANSLATION_PART_MAX_SENTENCES:
+        return dictation.plan_parts(count, [])
+    return None
+
+
+def save_parts(
+    lesson: Dict[str, Any], parts: Sequence[Dict[str, int]], *, model: str, starts: Sequence[int]
+) -> Path:
+    return utils.write_json(
+        _parts_path(lesson["id"]),
+        {
+            "v": 1,
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "model": model,
+            "sentence_count": len(lesson.get("sentences") or []),
+            "model_starts": list(starts),
+            "parts": list(parts),
+        },
+    )
+
+
+def append_translation(lesson_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Log one submitted translation; `review` is None until it is graded."""
+    stored = {"v": 1, "ts": dt.datetime.now().isoformat(timespec="seconds"), **record}
+    with _results_lock:
+        utils.append_jsonl(_translations_path(lesson_id), stored)
+    return stored
+
+
+def latest_translations(lesson_id: str) -> Dict[int, Dict[str, Any]]:
+    """The last submission per part (a redo replaces what the page shows)."""
+    latest: Dict[int, Dict[str, Any]] = {}
+    for record in utils.read_jsonl(_translations_path(lesson_id)):
+        if isinstance(record.get("part"), int):
+            latest[record["part"]] = record
+    return latest
+
+
+def part_source(lesson: Dict[str, Any], part: Dict[str, int]) -> List[str]:
+    return [s["text"] for s in (lesson.get("sentences") or [])[part["first"] : part["end"]]]
+
+
+def translation_payload(lesson: Dict[str, Any]) -> Dict[str, Any]:
+    """The translation task of a lesson for the page: the parts with their
+    source text, how much of each is dictated, and the last translation."""
+    parts = resolve_parts(lesson)
+    done = {
+        index
+        for index, record in dictation.latest_by_sentence(lesson_results(lesson["id"])).items()
+        if record.get("completed")
+    }
+    translations = latest_translations(lesson["id"])
+    return {
+        "needs_split": parts is None,
+        "parts": [
+            {
+                "index": number,
+                "first": part["first"],
+                "end": part["end"],
+                "sentences": part["end"] - part["first"],
+                "dictated": sum(1 for i in range(part["first"], part["end"]) if i in done),
+                "text": " ".join(part_source(lesson, part)),
+                "translation": translations.get(number),
+            }
+            for number, part in enumerate(parts or [])
+        ],
+    }
+
+
 def lesson_payload(lesson: Dict[str, Any]) -> Dict[str, Any]:
     """The lesson page's data: the summary plus every sentence, tokenised.
 
@@ -224,6 +324,7 @@ def lesson_payload(lesson: Dict[str, Any]) -> Dict[str, Any]:
         **lesson_summary(lesson),
         "sentences": sentences,
         "results": dictation.latest_by_sentence(results),
+        "translation": translation_payload(lesson),
     }
 
 

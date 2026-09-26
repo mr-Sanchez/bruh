@@ -108,6 +108,8 @@ def items_from_analysis(session: AnalysedSession) -> List[Dict[str, Any]]:
                 "correction": correction,
                 "better_versions": list(issue.get("better_versions") or []),
                 "explanation": issue.get("explanation") or "",
+                "focus": pattern["rule"] if isinstance(pattern, dict) and pattern.get("rule") else "",
+                "drills": clean_drills(issue.get("drills")),
             },
         )
 
@@ -170,6 +172,30 @@ def _merge_item(bank: Dict[str, Dict[str, Any]], item: Dict[str, Any], *, reword
 
 def _dicts(value: Any) -> List[Dict[str, Any]]:
     return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+
+def clean_drills(value: Any) -> List[Dict[str, str]]:
+    """A mistake's practice sentences, without any that lack either side."""
+    drills = []
+    for drill in _dicts(value):
+        russian = str(drill.get("russian") or "").strip()
+        english = str(drill.get("english") or "").strip()
+        if russian and english:
+            drills.append({"russian": russian, "english": english})
+    return drills
+
+
+def is_retired(item: Dict[str, Any]) -> bool:
+    """A mistake card with no practice sentences is no longer shown.
+
+    Decided 2026-09-26: a card that shows the verbatim quote ("resource the
+    code base") loses its context within days, and a long quote hides which
+    of its problems is meant. Mistakes analysed before practice sentences
+    existed - and non-English ones, which get none - stay in the bank as
+    history (their attempts still count towards topic accuracy) but never
+    reach a queue.
+    """
+    return item.get("kind") == KIND_FIX and not (item.get("content") or {}).get("drills")
 
 
 # ------------------------------------------------------------------ Leitner
@@ -333,7 +359,7 @@ def topic_mastery(
     item_counts: Dict[str, Dict[str, int]] = {}
     for item_id_, item in bank.items():
         topic = item.get("topic")
-        if not topic:
+        if not topic or is_retired(item):
             continue
         counts = item_counts.setdefault(topic, {"items": 0, "due": 0, "closed": 0})
         counts["items"] += 1
@@ -397,10 +423,11 @@ def daily_queue(
     major mistakes first, interleaved with phrases oldest first. New cards
     already started today count against the day's allowance.
     """
+    live = {item_id_ for item_id_, item in bank.items() if not is_retired(item)}
     reviews = [
         item_id_
         for item_id_, state in states.items()
-        if item_id_ in bank and not state.is_new and state.is_due(today)
+        if item_id_ in live and not state.is_new and state.is_due(today)
     ]
     reviews.sort(key=lambda i: (states[i].box, states[i].due or "", i))
 
@@ -415,7 +442,7 @@ def daily_queue(
     fresh = [
         item_id_
         for item_id_, state in states.items()
-        if item_id_ in bank and state.is_new and state.is_due(today)
+        if item_id_ in live and state.is_new and state.is_due(today)
     ]
 
     def first_seen(item_id_: str) -> str:
@@ -450,8 +477,7 @@ def daily_queue(
 
 
 # ---------------------------------------------------------- card exercises
-EXERCISE_SCRAMBLE = "scramble"  # put the correction's words back in order
-EXERCISE_TYPE = "type"  # type the correction; checked by normalised exact match
+EXERCISE_TRANSLATE = "translate"  # say a new Russian sentence in English; Claude checks
 EXERCISE_GAP = "gap"  # type the phrase into the gap in its own example
 EXERCISE_SELF = "self"  # recall, reveal, grade yourself
 
@@ -459,24 +485,29 @@ _PARENTHESES = re.compile(r"\s*\([^)]*\)")
 
 
 def card_exercise(item: Dict[str, Any], state: ItemState) -> Dict[str, Any]:
-    """How a card is drilled, picked from its content and Leitner box.
+    """How a card is drilled, picked from its content and history.
 
-    Mistakes get easier on the first pass (a scramble of the correction) and
-    harder once the learner has got them right (typed recall). Anything that
-    code cannot check fairly - rules, long sentences, phrases that are really
-    grammar notes ("help + verb-ing") - is a self-graded flashcard.
+    A mistake is a Russian sentence to say in English with the construction
+    that went wrong; every attempt moves on to the next of its sentences, so
+    a review is never the same sentence twice in a row. The answer is free
+    text, so Claude checks it (POST /api/learner/cards/<id>/check). Anything
+    code cannot check fairly - rules, phrases that are really grammar notes
+    ("help + verb-ing") - is a self-graded flashcard.
     """
     content = item.get("content") or {}
     kind = item.get("kind")
     if kind == KIND_FIX:
-        correction = (content.get("correction") or "").strip()
-        words = len(correction.split())
-        if state.box <= 1 and config.SCRAMBLE_MIN_WORDS <= words <= config.SCRAMBLE_MAX_WORDS:
-            return {"type": EXERCISE_SCRAMBLE, "answer": correction}
-        if words <= config.TYPED_CHECK_MAX_WORDS:
-            accept = [correction] + [v for v in content.get("better_versions") or [] if v]
-            return {"type": EXERCISE_TYPE, "accept": accept}
-        return {"type": EXERCISE_SELF}
+        drills = content.get("drills") or []
+        if not drills:
+            return {"type": EXERCISE_SELF}
+        index = state.attempts % len(drills)
+        return {
+            "type": EXERCISE_TRANSLATE,
+            "drill": index,
+            "russian": drills[index]["russian"],
+            "reference": drills[index]["english"],
+            "focus": content.get("focus") or "",
+        }
     if kind == KIND_PHRASE:
         gap = phrase_gap(content.get("phrase") or "", content.get("example") or "")
         if gap is not None:
@@ -503,35 +534,6 @@ def phrase_gap(phrase: str, example: str) -> Optional[Dict[str, Any]]:
     if normalize_text(base) != normalize_text(match.group(0)):
         accept.append(base)
     return {"before": example[: match.start()], "after": example[match.end():], "accept": accept}
-
-
-# -------------------------------------------------------------------- cloze
-_WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
-
-
-def cloze_segments(text: str, topic: str) -> List[Dict[str, Any]]:
-    """Split a text into plain runs and gaps for a topic's function words.
-
-    At most CLOZE_MAX_GAPS gaps, spread evenly over the text so a long
-    retelling does not turn into a wall of blanks.
-    """
-    words = set(config.CLOZE_WORDS.get(topic, ()))
-    candidates = [m for m in _WORD.finditer(text or "") if m.group(0).lower() in words]
-    limit = config.CLOZE_MAX_GAPS
-    if len(candidates) > limit:
-        step = len(candidates) / limit
-        candidates = [candidates[int(i * step)] for i in range(limit)]
-
-    segments: List[Dict[str, Any]] = []
-    position = 0
-    for match in candidates:
-        if match.start() > position:
-            segments.append({"text": text[position : match.start()]})
-        segments.append({"gap": match.group(0)})
-        position = match.end()
-    if position < len(text or ""):
-        segments.append({"text": text[position:]})
-    return segments
 
 
 # ------------------------------------------------------------ exercise sets
@@ -583,6 +585,9 @@ def items_from_set_run(
       translate  the learner's translation -> Claude's minimal correction of
                  it, with the reference as a "more natural" version.
 
+    Only a translation has a Russian sentence to practise with, so only it
+    becomes a live card (its drill is the set's own sentence); gap and fix
+    mistakes stay in the bank as retired history, like pre-2026-09-26 fixes.
     Skipped (left blank) translations make no card: there is no sentence of
     the learner's to correct.
     """
@@ -601,6 +606,7 @@ def items_from_set_run(
         accept = [a for a in exercise.get("accept") or [] if a]
         explanation = exercise.get("explanation") or ""
         better: List[str] = []
+        drills: List[Dict[str, str]] = []
         if exercise.get("type") == "gap" and accept:
             before, after = exercise.get("before", ""), exercise.get("after", "")
             quote = f"{before}{answer or '___'}{after}"
@@ -615,6 +621,7 @@ def items_from_set_run(
             if normalize_answer(reference) != normalize_answer(correction):
                 better = [reference]
             explanation = result.get("comment") or ""
+            drills = clean_drills([{"russian": exercise.get("russian"), "english": reference}])
         else:
             continue
         if not normalize_text(correction) or normalize_answer(quote) == normalize_answer(correction):
@@ -633,6 +640,8 @@ def items_from_set_run(
                     "correction": correction,
                     "better_versions": better,
                     "explanation": explanation,
+                    "focus": exercise.get("focus") or "",
+                    "drills": drills,
                 },
                 "occurrences": [dict(occurrence)],
             }
@@ -659,32 +668,6 @@ def activity_streak(active_days: Iterable[dt.date], today: dt.date) -> int:
         streak += 1
         day -= dt.timedelta(days=1)
     return streak
-
-
-def pick_cloze_text(texts: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The text a topic's cloze drill should use next.
-
-    Never-practised texts first (newest recording first - `texts` come in
-    that order), then the one with the lowest best score. Texts without gaps
-    are skipped.
-    """
-    candidates = [t for t in texts if t.get("gaps")]
-    fresh = [t for t in candidates if not t.get("attempts")]
-    if fresh:
-        return fresh[0]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda t: (t.get("best_score") or 0.0, t.get("attempts", 0)))
-
-
-def cloze_topic_order(mastery: Sequence[Dict[str, Any]]) -> List[str]:
-    """Cloze topics, the one that needs training most first.
-
-    `mastery` is topic_mastery() output (already sorted by priority); cloze
-    topics the learner has no data on yet come last, in config order.
-    """
-    ranked = [row["key"] for row in mastery if row["key"] in config.CLOZE_WORDS]
-    return ranked + [topic for topic in config.CLOZE_WORDS if topic not in ranked]
 
 
 def attempts_on(attempts: Sequence[Dict[str, Any]], day: dt.date) -> List[Dict[str, Any]]:

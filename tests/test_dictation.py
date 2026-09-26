@@ -393,5 +393,53 @@ class FetcherTests(unittest.TestCase):
             fetcher.fetch("https://youtu.be/dQw4w9WgXcQ", self.target, ["en"])
 
 
+class PlanPartsTests(unittest.TestCase):
+    @staticmethod
+    def sizes(parts: Any) -> list:
+        return [part["end"] - part["first"] for part in parts]
+
+    def test_the_models_breaks_are_kept_when_they_fit(self) -> None:
+        parts = dictation.plan_parts(24, [8, 16])
+        self.assertEqual(
+            parts,
+            [{"first": 0, "end": 8}, {"first": 8, "end": 16}, {"first": 16, "end": 24}],
+        )
+
+    def test_junk_breaks_are_ignored(self) -> None:
+        parts = dictation.plan_parts(20, [0, 10, 10, 99, -3, "x"])
+        self.assertEqual(self.sizes(parts), [10, 10])
+
+    def test_an_oversized_part_is_cut_evenly(self) -> None:
+        self.assertEqual(self.sizes(dictation.plan_parts(40, [])), [14, 13, 13])
+        self.assertEqual(self.sizes(dictation.plan_parts(16, [])), [8, 8])
+
+    def test_a_tiny_part_is_merged_into_its_shorter_neighbour(self) -> None:
+        # 2 | 12 | 6: the two-sentence part joins the 12 -> 14, then 6 stays.
+        parts = dictation.plan_parts(20, [2, 14])
+        self.assertEqual(self.sizes(parts), [14, 6])
+
+    def test_a_merge_that_overflows_is_cut_again_and_covers_everything(self) -> None:
+        parts = dictation.plan_parts(19, [3, 18])  # 3 | 15 | 1
+        self.assertEqual(sum(self.sizes(parts)), 19)
+        self.assertTrue(all(5 <= size <= 15 for size in self.sizes(parts)), parts)
+        self.assertEqual(parts[0]["first"], 0)
+        self.assertEqual(parts[-1]["end"], 19)
+
+    def test_a_short_lesson_is_one_part_and_an_empty_one_has_none(self) -> None:
+        self.assertEqual(dictation.plan_parts(3, [1, 2]), [{"first": 0, "end": 3}])
+        self.assertEqual(dictation.plan_parts(0, [1]), [])
+
+    def test_every_shape_gives_contiguous_parts_within_limits(self) -> None:
+        for count in range(5, 80):
+            for starts in ([], [count // 2], [1, 2, 3], list(range(1, count, 3))):
+                parts = dictation.plan_parts(count, starts)
+                self.assertEqual(parts[0]["first"], 0)
+                self.assertEqual(parts[-1]["end"], count)
+                self.assertTrue(all(a["end"] == b["first"] for a, b in zip(parts, parts[1:])))
+                self.assertTrue(all(size <= 15 for size in self.sizes(parts)), (count, starts))
+                if len(parts) > 1:
+                    self.assertTrue(all(size >= 5 for size in self.sizes(parts)), (count, starts))
+
+
 if __name__ == "__main__":
     unittest.main()

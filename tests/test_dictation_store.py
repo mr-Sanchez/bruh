@@ -180,5 +180,80 @@ class DictationStoreTests(unittest.TestCase):
         self.assertFalse(dictation_store.delete_lesson("dQw4w9WgXcQ"))
 
 
+class TranslationStoreTests(unittest.TestCase):
+    """Translation parts and submitted translations on disk."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base_dir_patch = patch.object(config, "base_dir", return_value=Path(self._tmp.name))
+        base_dir_patch.start()
+        self.addCleanup(base_dir_patch.stop)
+
+    def _lesson(self, sentences: int = 0):
+        lesson = dictation_store.start_import("dQw4w9WgXcQ", "https://youtu.be/x", "en-US")
+        video = fetched()
+        lesson = dictation_store.finish_import(
+            lesson, video, dictation.lesson_sentences(video.subtitles)
+        )
+        if sentences:
+            lesson["sentences"] = [
+                {"text": f"Sentence number {n} is here.", "start": n, "end": n + 1.0}
+                for n in range(sentences)
+            ]
+            dictation_store.save_lesson(lesson)
+        return lesson
+
+    def test_a_short_lesson_is_one_part_without_being_split(self) -> None:
+        payload = dictation_store.translation_payload(self._lesson())  # two sentences
+
+        self.assertFalse(payload["needs_split"])
+        self.assertEqual(len(payload["parts"]), 1)
+        self.assertEqual(payload["parts"][0]["sentences"], 2)
+        self.assertTrue(payload["parts"][0]["text"].startswith("Hello everyone"))
+
+    def test_a_long_lesson_needs_a_split_until_one_is_saved(self) -> None:
+        lesson = self._lesson(30)
+        self.assertTrue(dictation_store.translation_payload(lesson)["needs_split"])
+
+        parts = dictation.plan_parts(30, [10, 20])
+        dictation_store.save_parts(lesson, parts, model="haiku", starts=[10, 20])
+        payload = dictation_store.translation_payload(lesson)
+
+        self.assertFalse(payload["needs_split"])
+        self.assertEqual([p["sentences"] for p in payload["parts"]], [10, 10, 10])
+        self.assertEqual(payload["parts"][1]["first"], 10)
+
+    def test_a_saved_cut_is_dropped_when_the_sentences_changed(self) -> None:
+        lesson = self._lesson(30)
+        dictation_store.save_parts(lesson, dictation.plan_parts(30, [15]), model="m", starts=[15])
+        lesson["sentences"] = lesson["sentences"][:25]
+
+        self.assertIsNone(dictation_store.resolve_parts(lesson))
+
+    def test_dictated_sentences_are_counted_per_part(self) -> None:
+        lesson = self._lesson(30)
+        dictation_store.save_parts(lesson, dictation.plan_parts(30, [15]), model="m", starts=[15])
+        for index in (0, 1, 16):
+            dictation_store.append_result(lesson["id"], {"sentence": index, "completed": True})
+        dictation_store.append_result(lesson["id"], {"sentence": 2, "completed": False})
+
+        parts = dictation_store.translation_payload(lesson)["parts"]
+
+        self.assertEqual([p["dictated"] for p in parts], [2, 1])
+
+    def test_the_latest_translation_per_part_is_what_the_page_shows(self) -> None:
+        lesson = self._lesson()
+        dictation_store.append_translation(lesson["id"], {"part": 0, "text": "one", "review": None})
+        dictation_store.append_translation(lesson["id"], {"part": 0, "text": "two", "review": {}})
+
+        latest = dictation_store.translation_payload(lesson)["parts"][0]["translation"]
+
+        self.assertEqual(latest["text"], "two")
+        # Append-only: the first attempt is still in the file.
+        path = dictation_store.lesson_dir(lesson["id"]) / config.LESSON_TRANSLATIONS_FILENAME
+        self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

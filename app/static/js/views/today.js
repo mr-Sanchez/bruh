@@ -1,12 +1,11 @@
 // «Сегодня» - the home screen: a ~10-minute workout assembled by the server
 // from the learner model (GET /api/learner/today, no LLM involved):
 //   1. today's cards (due reviews + new ones),
-//   2. one cloze drill on the topic that needs it most,
-//   3. one live activity - a monologue on the day's prompt (a picture
+//   2. one live activity - a monologue on the day's prompt (a picture
 //      description done today counts too);
-//   4. a few sentences of listening dictation from a YouTube lesson ($0);
-//   5. optional and paid: an AI exercise set on the main topic;
-//   6. optional, Deepgram only: a spoken warm-up («60 секунд» or shadowing).
+//   3. a few sentences of listening dictation from a YouTube lesson ($0);
+//   4. optional and paid: an AI exercise set on the main topic;
+//   5. optional, Deepgram only: a spoken warm-up («60 секунд» or shadowing).
 // Each step's done/todo state comes from the attempts log and today's
 // recordings, so the screen stays right after a reload.
 window.Views = window.Views || {};
@@ -16,7 +15,6 @@ Views.today = (() => {
 
   const STEP_TITLES = {
     cards: "Карточки",
-    cloze: "Пропуски в тексте",
     monologue: "Монолог",
     dictation: "Диктант на слух",
     ai_set: "AI-набор по главной теме",
@@ -106,7 +104,6 @@ Views.today = (() => {
 
   function renderStep(step) {
     if (step.kind === "cards") return renderCards(step);
-    if (step.kind === "cloze") return renderCloze(step);
     if (step.kind === "dictation") return renderDictation(step);
     if (step.kind === "ai_set") return renderSet(step);
     if (step.kind === "speech") return renderSpeech(step);
@@ -197,19 +194,6 @@ Views.today = (() => {
     return stepShell(step, body, `<button data-role="cards">Начать (${shown})</button>`);
   }
 
-  function renderCloze(step) {
-    const topic = escapeHtml(step.topic.label);
-    if (step.status === "done") {
-      return stepShell(step, `<p class="muted">${topic}: ${Math.round(step.score * 100)}% верно.</p>`);
-    }
-    const text = step.text;
-    return stepShell(
-      step,
-      `<p class="muted">${topic} · ваш текст от ${escapeHtml(text.recorded_at.slice(0, 10))} · пропусков: ${text.gaps}</p>`,
-      `<button data-role="cloze">Начать</button>`
-    );
-  }
-
   function renderMonologue(step) {
     const prompt = step.prompt;
     const question = `
@@ -248,7 +232,6 @@ Views.today = (() => {
 
   function wire(container, workout) {
     const cards = workout.steps.find((s) => s.kind === "cards");
-    const cloze = workout.steps.find((s) => s.kind === "cloze");
     const again = () => {
       if (root === container) render(container);
     };
@@ -256,12 +239,6 @@ Views.today = (() => {
     if (cardsButton) {
       cardsButton.addEventListener("click", () =>
         Drill.runCards(container, cards.items, { title: "Сегодня: карточки", context: "today", onFinish: again })
-      );
-    }
-    const clozeButton = container.querySelector('[data-role="cloze"]');
-    if (clozeButton) {
-      clozeButton.addEventListener("click", () =>
-        Drill.runCloze(container, cloze.text, cloze.topic.key, { context: "today", onFinish: again })
       );
     }
     // A paid click: an already generated set opens as is, otherwise one is

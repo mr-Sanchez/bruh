@@ -66,8 +66,13 @@ const Api = (() => {
       if (dueOnly) params.set("due_only", "true");
       return request(`/api/learner/items?${params}`);
     },
-    getPracticeTexts: (topic) =>
-      request(`/api/learner/texts${topic ? `?topic=${encodeURIComponent(topic)}` : ""}`),
+    // Claude checks one translation card's answer (the attempt is posted separately).
+    checkCard: (itemId, drill, answer) =>
+      request(`/api/learner/cards/${encodeURIComponent(itemId)}/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drill, answer }),
+      }),
     postAttempt: (attempt) =>
       request("/api/learner/attempts", {
         method: "POST",
@@ -113,6 +118,15 @@ const Api = (() => {
         body: JSON.stringify(result),
       }),
     getDictationStats: () => request("/api/dictation/stats"),
+    // The translation task after a dictation: two explicit Haiku calls.
+    splitLesson: (id) =>
+      request(`/api/dictation/lessons/${encodeURIComponent(id)}/parts`, { method: "POST" }),
+    postPartTranslation: (id, part, text) =>
+      request(`/api/dictation/lessons/${encodeURIComponent(id)}/parts/${part}/translation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      }),
 
     analyzeSession: (id, force = false) =>
       request(`/api/sessions/${encodeURIComponent(id)}/analyze`, {

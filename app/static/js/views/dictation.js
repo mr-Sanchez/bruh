@@ -3,7 +3,8 @@
 // segment and typed word by word.
 //   #/dictation            lessons: import a link, see progress, continue one
 //   #/dictation/<videoId>  the workspace: one sentence at a time
-// Checking is entirely local (the same rules as app/dictation.py: case and
+// Under the typing card, translation.js offers the optional translation task
+// (Haiku, on explicit clicks). Checking is entirely local (the same rules as app/dictation.py: case and
 // punctuation are ignored); each finished sentence is logged to the server,
 // which grades it again and owns the statistics.
 window.Views = window.Views || {};
@@ -59,7 +60,8 @@ Views.dictation = (() => {
         <h2>Диктант</h2>
         <p class="muted">Вставьте ссылку на видео с YouTube — приложение возьмёт его субтитры как
           эталон и разобьёт на предложения. Наберите каждое на слух: проверка идёт по буквам,
-          подсказка по клавише Tab. Бесплатно: ни Deepgram, ни Claude тут не участвуют.</p>
+          подсказка по клавише Tab. Сам диктант бесплатный: ни Deepgram, ни Claude тут не участвуют.
+          Перевод услышанного по частям — по кнопке под диктантом, это копейки на Haiku.</p>
         <form class="dictation-import" data-role="import">
           <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=..."
             aria-label="Ссылка на видео" required />
@@ -249,12 +251,17 @@ Views.dictation = (() => {
         <p class="muted dictation-help">Enter — слушать снова · Esc — пауза / продолжить ·
           Space — следующее слово ·
           Tab — подсказка · Backspace в пустом поле — назад · [ и ] — соседние предложения</p>
-      </div>`;
+      </div>
+      <div class="card" data-role="translation"></div>`;
 
     const audio = container.querySelector('[data-role="audio"]');
     const line = container.querySelector('[data-role="line"]');
     const verdict = container.querySelector('[data-role="verdict"]');
     const counter = container.querySelector('[data-role="counter"]');
+    const translation = Translation.mount(
+      container.querySelector('[data-role="translation"]'),
+      lesson
+    );
 
     // ------------------------------------------------------------ helpers
     const sentence = () => sentences[index];
@@ -365,6 +372,7 @@ Views.dictation = (() => {
       });
       lesson.results[index] = saved.result;
       lesson.progress = saved.progress;
+      translation.refresh(); // a part opens when its last sentence is done
       return saved;
     }
 

@@ -11,7 +11,10 @@ later switch from flat files to SQLite stays local to it. The files:
                        so the real price per exercise is visible;
   data/practice/*.json AI exercise sets and every run of them. Paid for and
                        not rebuildable, like analysis.json; their wrong
-                       answers are a second source of bank items.
+                       answers are a second source of bank items;
+  data/card_verdicts.jsonl
+                       append-only cache of Claude's checks of card answers,
+                       so the same answer to the same sentence is paid once.
 
 Spoken drills (talk, shadowing) are ordinary recordings; their results are
 derived on read from deepgram_response.json and logged as topic attempts.
@@ -37,7 +40,8 @@ from app import config, dictation_store, learner_model, progress_store, speech_d
 logger = logging.getLogger(__name__)
 
 # v2: cards from mistakes made in AI exercise sets (origin "ai_set").
-BANK_SCHEMA_VERSION = 2
+# v3: fix items carry `drills` + `focus`; fixes without drills are retired.
+BANK_SCHEMA_VERSION = 3
 SET_SCHEMA_VERSION = 1
 ATTEMPT_RECORD_VERSION = 1
 USAGE_RECORD_VERSION = 1
@@ -46,6 +50,7 @@ _bank_lock = threading.Lock()
 _attempts_lock = threading.Lock()
 _usage_lock = threading.Lock()
 _sets_lock = threading.Lock()
+_verdicts_lock = threading.Lock()
 
 
 def _bank_path() -> Path:
@@ -123,10 +128,9 @@ def append_attempt(
     context: Optional[str] = None,
     when: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
-    """Log one answer. A card attempt names its item; a topic drill (a cloze
-    over a whole text, or a run of an AI exercise set) names its topic
-    instead and carries its share of right answers as `score`, plus the
-    recording the text came from or the set."""
+    """Log one answer. A card attempt names its item; a topic drill (a run of
+    an AI exercise set, a spoken drill) names its topic instead and carries
+    its score, plus the recording or the set it came from."""
     if not item_id and not topic:
         raise ValueError("An attempt needs an item_id or a topic.")
     record: Dict[str, Any] = {
@@ -226,45 +230,49 @@ def card(item: Dict[str, Any], state: learner_model.ItemState, today: dt.date) -
     }
 
 
-# ------------------------------------------------------------ topic drills
-def practice_texts(topic: Optional[str] = None) -> List[Dict[str, Any]]:
-    """English improved_version texts for cloze drills, newest recording first.
+# ------------------------------------------------------------ card verdicts
+def _verdicts_path() -> Path:
+    return config.data_dir() / config.CARD_VERDICTS_FILENAME
 
-    Cloze topics are English function words, so Russian recordings are left
-    out; mixed ("multi") ones are kept since their retelling is English.
-    With `topic`, each text also carries its gaps and past results.
+
+def _verdict_key(russian: str, answer: str) -> tuple:
+    return (learner_model.normalize_text(russian), learner_model.normalize_answer(answer))
+
+
+def cached_card_verdict(russian: str, answer: str) -> Optional[Dict[str, Any]]:
+    """Claude's earlier check of the same answer to the same sentence, if any.
+
+    Keyed by the sentence rather than the card: a re-analysis that rewords a
+    card keeps whatever verdicts still apply.
     """
-    attempts = load_attempts() if topic else []
-    texts = []
-    for session in utils.iter_analysed_sessions():
-        text = session.analysis.get("improved_version")
-        if not isinstance(text, str) or not text.strip():
-            continue
-        if not learner_model.languages_compatible(session.language, "en"):
-            continue
-        entry: Dict[str, Any] = {
-            "session_id": session.session_id,
-            "recorded_at": session.recorded_at.isoformat(),
-            "language": session.language,
-            "text": text,
-        }
-        if topic:
-            segments = learner_model.cloze_segments(text, topic)
-            done = [
-                a
-                for a in attempts
-                if a.get("topic") == topic and a.get("session_id") == session.session_id
-            ]
-            entry.update(
-                {
-                    "segments": segments,
-                    "gaps": sum(1 for s in segments if "gap" in s),
-                    "attempts": len(done),
-                    "best_score": max((learner_model.attempt_score(a) for a in done), default=None),
-                }
-            )
-        texts.append(entry)
-    return texts[::-1]
+    key = _verdict_key(russian, answer)
+    found = None
+    for record in utils.read_jsonl(_verdicts_path()):
+        if _verdict_key(record.get("russian", ""), record.get("answer", "")) == key:
+            found = record
+    if found is None:
+        return None
+    return {field: found.get(field) for field in ("correct", "comment", "corrected")}
+
+
+def store_card_verdict(
+    item_id: str, russian: str, answer: str, verdict: Dict[str, Any], *, model: str, cost: Any
+) -> None:
+    record = {
+        "ts": dt.datetime.now().isoformat(timespec="seconds"),
+        "item_id": item_id,
+        "russian": russian,
+        "answer": answer,
+        **{field: verdict.get(field) for field in ("correct", "comment", "corrected")},
+        "model": model,
+        "cost_usd": cost,
+    }
+    # A lost cache entry only means a later identical answer is paid again.
+    try:
+        with _verdicts_lock:
+            utils.append_jsonl(_verdicts_path(), record)
+    except OSError:
+        logger.exception("Could not append to the card verdict cache")
 
 
 # ------------------------------------------------------------ exercise sets
@@ -401,7 +409,7 @@ def record_set_run(
     """Store one finished run of a set and feed it into the learner model.
 
     The run and Claude's verdicts go into the set file, the score into the
-    attempts log (a topic attempt, like a cloze) and the wrong answers into
+    attempts log (a topic attempt) and the wrong answers into
     the item bank as new cards.
     """
     now = now or dt.datetime.now()
@@ -444,7 +452,9 @@ def record_set_run(
     new_cards = {
         item["id"]
         for item in learner_model.items_from_set_run(exercise_set, run)
-        if item["id"] not in before and item["id"] in after
+        if item["id"] not in before
+        and item["id"] in after
+        and not learner_model.is_retired(after[item["id"]])
     }
     return {"run": run, "new_cards": len(new_cards), "set": set_summary(exercise_set)}
 
@@ -727,9 +737,12 @@ def _dictation_step(now: dt.datetime) -> Dict[str, Any]:
 
 # ------------------------------------------------------------ daily workout
 def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
-    """The «Сегодня» workout, assembled by code (no LLM): cards, then a topic
-    drill, then one live activity. Each step says whether it is done today,
-    judged from the attempts log and today's recordings."""
+    """The «Сегодня» workout, assembled by code (no LLM): cards, one live
+    activity, dictation, then the optional steps. Each step says whether it is
+    done today, judged from the attempts log and today's recordings.
+
+    The cloze on improved_version was dropped on 2026-09-26: gaps in a text the
+    learner remembers test memory of that text, not the rule."""
     now = now or dt.datetime.now()
     today = now.date()
     snap = _snapshot(now)
@@ -760,32 +773,7 @@ def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
         ),
     }
 
-    # 2. Topic drill: one cloze, on the cloze topic that needs it most.
-    drill_step: Optional[Dict[str, Any]] = None
-    done_drills = [a for a in attempts_today if a.get("exercise") == "cloze"]
-    if done_drills:
-        last = done_drills[-1]
-        drill_step = {
-            "kind": "cloze",
-            "status": "done",
-            "topic": topic_info(last["topic"]),
-            "score": learner_model.attempt_score(last),
-            "minutes": 0,
-        }
-    else:
-        for topic in learner_model.cloze_topic_order(snap["mastery"]):
-            text = learner_model.pick_cloze_text(practice_texts(topic))
-            if text is not None:
-                drill_step = {
-                    "kind": "cloze",
-                    "status": "todo",
-                    "topic": topic_info(topic),
-                    "text": text,
-                    "minutes": round(config.WORKOUT_MINUTES_CLOZE),
-                }
-                break
-
-    # 3. Live activity: a monologue on today's prompt, recorded and analysed.
+    # 2. Live activity: a monologue on today's prompt, recorded and analysed.
     # A picture description done today counts too: the slot is "speak once".
     # Spoken drills are not the live step: they are never analysed.
     sessions = utils.list_sessions()
@@ -809,15 +797,15 @@ def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
         "minutes": 0 if live_status == "done" else round(config.WORKOUT_MINUTES_MONOLOGUE),
     }
 
-    # 4. Listening dictation: a few sentences of a YouTube lesson ($0).
+    # 3. Listening dictation: a few sentences of a YouTube lesson ($0).
     dictation_step = _dictation_step(now)
-    # 5. Optional and paid: an AI exercise set on the main topic.
+    # 4. Optional and paid: an AI exercise set on the main topic.
     set_step = _set_step(snap["mastery"], attempts_today)
-    # 6. Optional, Deepgram only: a spoken warm-up.
+    # 5. Optional, Deepgram only: a spoken warm-up.
     speech_step = _speech_step(today, sessions)
 
     focus = next((row for row in snap["mastery"] if row["priority"] > 0), None)
-    steps = [cards_step] + ([drill_step] if drill_step else []) + [live_step, dictation_step]
+    steps = [cards_step, live_step, dictation_step]
     steps += [set_step] if set_step else []
     steps += [speech_step] if speech_step else []
 

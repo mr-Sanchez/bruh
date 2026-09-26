@@ -10,8 +10,6 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from unittest.mock import patch  # noqa: E402
-
 from app import config, learner_model  # noqa: E402
 from app.learner_model import KIND_FIX, KIND_PATTERN, KIND_PHRASE  # noqa: E402
 from app.utils import AnalysedSession  # noqa: E402
@@ -29,6 +27,7 @@ def issue(
     quote: str = "some wrong words",
     topic: str = "prepositions",
     rule: str = "",
+    drills: Any = None,
 ) -> Dict[str, Any]:
     return {
         "topic": topic,
@@ -38,7 +37,11 @@ def issue(
         "better_versions": [],
         "pattern": {"rule": rule, "examples": ["Example."]} if rule else None,
         "severity": "moderate",
+        "drills": [DRILL] if drills is None else drills,
     }
+
+
+DRILL = {"russian": "Я отвечаю за бэкенд.", "english": "I'm responsible for the backend."}
 
 
 def phrase(text: str) -> Dict[str, str]:
@@ -85,6 +88,20 @@ class BankTests(unittest.TestCase):
         self.assertEqual(
             kinds[KIND_FIX]["occurrences"], [{"session_id": "s1", "at": DAY1.isoformat()}]
         )
+        self.assertEqual(kinds[KIND_FIX]["content"]["drills"], [DRILL])
+        self.assertEqual(kinds[KIND_FIX]["content"]["focus"], "responsible for + noun")
+        self.assertFalse(learner_model.is_retired(kinds[KIND_FIX]))
+
+    def test_a_fix_without_practice_sentences_is_retired(self) -> None:
+        # Analyses from before 2026-09-26 (and non-English mistakes) have no
+        # drills: the item stays as history but is never shown as a card.
+        analysis = {"issues": [issue("went home", drills=[]), issue("go to work", drills=[
+            {"russian": "", "english": "Half a drill."}, {"russian": "Иду.", "english": "I go."},
+        ])]}
+        old, new = learner_model.items_from_analysis(session("s1", DAY1, analysis))
+        self.assertTrue(learner_model.is_retired(old))
+        self.assertEqual(new["content"]["drills"], [{"russian": "Иду.", "english": "I go."}])
+        self.assertFalse(learner_model.is_retired({"kind": KIND_PHRASE, "content": {}}))
 
     def test_delivery_topics_and_no_op_fixes_do_not_become_cards(self) -> None:
         analysis = {
@@ -251,6 +268,7 @@ class DailyQueueTests(unittest.TestCase):
                 "kind": KIND_FIX,
                 "topic": topic,
                 "severity": "moderate",
+                "content": {"drills": [DRILL]},
                 "occurrences": [{"session_id": "s1", "at": day(1).isoformat()}],
             }
         for n in range(phrases):
@@ -305,6 +323,14 @@ class DailyQueueTests(unittest.TestCase):
         )
         self.assertEqual(queue["new"], ["fix-zz", "fix-00"])
 
+    def test_retired_fixes_never_reach_the_queue(self) -> None:
+        bank = self._bank(fixes=2, phrases=0)
+        bank["fix-01"]["content"] = {"drills": []}
+        yesterday = dt.datetime(2026, 9, 9, 12)
+        attempts = {"fix-01": [attempt(yesterday, False)]}  # would be due today
+        queue = learner_model.daily_queue(bank, self._states(bank, attempts), {}, self.TODAY)
+        self.assertEqual((queue["reviews"], queue["new"], queue["new_waiting"]), ([], ["fix-00"], 0))
+
 
 class CardExerciseTests(unittest.TestCase):
     def _card(self, item: Dict[str, Any], attempts=()) -> Dict[str, Any]:
@@ -312,27 +338,32 @@ class CardExerciseTests(unittest.TestCase):
         state = learner_model.item_state(item, list(attempts), [])
         return learner_model.card_exercise(item, state)
 
-    def _fix(self, correction: str, better=()) -> Dict[str, Any]:
+    def _fix(self, drills) -> Dict[str, Any]:
         return {
             "kind": KIND_FIX,
-            "content": {"quote": "q", "correction": correction, "better_versions": list(better)},
+            "content": {"quote": "q", "correction": "c", "focus": "for + noun", "drills": drills},
         }
 
-    def test_new_fix_is_a_scramble_then_typed_recall_once_learned(self) -> None:
-        fix = self._fix("I started my new project", better=["I began a new project"])
+    def test_fix_is_a_translation_that_moves_to_the_next_sentence_each_attempt(self) -> None:
+        drills = [DRILL, {"russian": "Она ждёт ответа.", "english": "She is waiting for an answer."}]
+        first = self._card(self._fix(drills))
         self.assertEqual(
-            self._card(fix), {"type": "scramble", "answer": "I started my new project"}
+            first,
+            {
+                "type": "translate",
+                "drill": 0,
+                "russian": DRILL["russian"],
+                "reference": DRILL["english"],
+                "focus": "for + noun",
+            },
         )
-        learned = self._card(fix, [attempt(day(2), True)])  # box 2
-        self.assertEqual(
-            learned,
-            {"type": "type", "accept": ["I started my new project", "I began a new project"]},
-        )
+        second = self._card(self._fix(drills), [attempt(day(2), False)])
+        self.assertEqual((second["drill"], second["russian"]), (1, "Она ждёт ответа."))
+        third = self._card(self._fix(drills), [attempt(day(2), False), attempt(day(3), True)])
+        self.assertEqual(third["drill"], 0)
 
-    def test_short_and_long_fixes(self) -> None:
-        self.assertEqual(self._card(self._fix("I went"))["type"], "type")
-        long_fix = self._fix(" ".join(["word"] * 17))
-        self.assertEqual(self._card(long_fix)["type"], "self")
+    def test_fix_without_sentences_falls_back_to_self_grading(self) -> None:
+        self.assertEqual(self._card(self._fix([])), {"type": "self"})
 
     def test_pattern_is_self_graded(self) -> None:
         pattern = {"kind": KIND_PATTERN, "content": {"rule": "help + verb", "examples": []}}
@@ -366,30 +397,6 @@ class CardExerciseTests(unittest.TestCase):
         self.assertEqual(learner_model.phrase_gap("a", "Think about a plan.")["before"], "Think about ")
 
 
-class ClozeTests(unittest.TestCase):
-    TEXT = "The team works on a project in the office with an intern."
-
-    def test_articles_become_gaps_and_the_text_is_preserved(self) -> None:
-        segments = learner_model.cloze_segments(self.TEXT, "articles")
-        self.assertEqual([s["gap"] for s in segments if "gap" in s], ["The", "a", "the", "an"])
-        rebuilt = "".join(s.get("text", s.get("gap")) for s in segments)
-        self.assertEqual(rebuilt, self.TEXT)
-
-    def test_prepositions_skip_to_and_whole_words_only(self) -> None:
-        segments = learner_model.cloze_segments("I want to go into the office.", "prepositions")
-        self.assertEqual([s["gap"] for s in segments if "gap" in s], ["into"])
-
-    def test_gaps_are_capped_and_spread_out(self) -> None:
-        text = " ".join(f"the w{i}" for i in range(40))
-        with patch.object(config, "CLOZE_MAX_GAPS", 4):
-            segments = learner_model.cloze_segments(text, "articles")
-        self.assertEqual(sum(1 for s in segments if "gap" in s), 4)
-        self.assertIn("w39", segments[-1]["text"])  # the tail of the text is kept
-
-    def test_unknown_topic_has_no_gaps(self) -> None:
-        self.assertEqual(learner_model.cloze_segments("The end.", "verb_tense"), [{"text": "The end."}])
-
-
 class WorkoutTests(unittest.TestCase):
     def test_streak_counts_up_to_yesterday_until_today_is_active(self) -> None:
         today = dt.date(2026, 9, 10)
@@ -398,23 +405,6 @@ class WorkoutTests(unittest.TestCase):
         self.assertEqual(learner_model.activity_streak(active | {today}, today), 3)
         self.assertEqual(learner_model.activity_streak({dt.date(2026, 9, 8)}, today), 0)
         self.assertEqual(learner_model.activity_streak(set(), today), 0)
-
-    def test_cloze_text_prefers_unpractised_then_lowest_score(self) -> None:
-        texts = [
-            {"session_id": "new", "gaps": 4, "attempts": 1, "best_score": 0.9},
-            {"session_id": "fresh", "gaps": 3, "attempts": 0, "best_score": None},
-            {"session_id": "empty", "gaps": 0, "attempts": 0, "best_score": None},
-            {"session_id": "weak", "gaps": 5, "attempts": 2, "best_score": 0.4},
-        ]
-        self.assertEqual(learner_model.pick_cloze_text(texts)["session_id"], "fresh")
-        self.assertEqual(learner_model.pick_cloze_text(texts[:1] + texts[3:])["session_id"], "weak")
-        self.assertIsNone(learner_model.pick_cloze_text(texts[2:3]))
-
-    def test_cloze_topics_follow_mastery_priority(self) -> None:
-        mastery = [{"key": "verb_tense"}, {"key": "prepositions"}]
-        self.assertEqual(
-            learner_model.cloze_topic_order(mastery), ["prepositions", "articles"]
-        )
 
     def test_prompt_changes_daily_and_stays_in_range(self) -> None:
         first = learner_model.speaking_prompt_index(dt.date(2026, 9, 1))
@@ -426,7 +416,7 @@ class WorkoutTests(unittest.TestCase):
         attempts = [
             {"ts": day(1, 9).isoformat(), "item_id": "a", "correct": True},
             {"ts": day(1, 10).isoformat(), "item_id": "b", "correct": False},
-            {"ts": day(1, 11).isoformat(), "topic": "articles", "exercise": "cloze",
+            {"ts": day(1, 11).isoformat(), "topic": "articles", "exercise": "ai_set",
              "score": 0.75, "correct": False},
             {"ts": day(3).isoformat(), "item_id": "a", "correct": True},
         ]
@@ -499,6 +489,14 @@ class ExerciseSetTests(unittest.TestCase):
         self.assertEqual(translation["content"]["correction"], "I have already fixed the bug.")
         self.assertEqual(translation["content"]["better_versions"], [])  # same as the reference
         self.assertEqual(translation["content"]["explanation"], "Нужно Present Perfect.")
+        # Only a translation has a Russian sentence to practise with: it is the
+        # live card; the gap and fix mistakes are kept as retired history.
+        self.assertEqual(
+            translation["content"]["drills"],
+            [{"russian": "Я уже починил баг.", "english": "I have already fixed the bug."}],
+        )
+        self.assertEqual(translation["content"]["focus"], "Present Perfect")
+        self.assertEqual([learner_model.is_retired(i) for i in items], [True, True, False])
         for item in items:
             self.assertEqual(
                 (item["kind"], item["topic"], item["origin"]), (KIND_FIX, "verb_tense", "ai_set")

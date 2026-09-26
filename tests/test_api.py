@@ -6,6 +6,7 @@ client_factory pattern already used inside transcriber.py/analyzer.py.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -17,10 +18,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import api, config  # noqa: E402
+from app import api, config, learner_store  # noqa: E402
 from app.analyzer import (  # noqa: E402
     ANALYSIS_SCHEMA_VERSION,
     AnalysisResult,
+    Drill,
     Issue,
     KeyPhrase,
     SceneDetail,
@@ -28,6 +30,10 @@ from app.analyzer import (  # noqa: E402
     Scores,
 )
 from app.analyzer import AnalysisError, MissingAnthropicApiKeyError  # noqa: E402
+from app.dictation_translation import (  # noqa: E402
+    ReviewResult,
+    SplitResult,
+)
 from app.exercise_sets import (  # noqa: E402
     ClaudeCall,
     GenerationResult,
@@ -81,6 +87,13 @@ class FakeAnalyzer:
             correction="I went",
             better_versions=["I went there."],
             severity="moderate",
+            drills=[
+                Drill(russian="Вчера я ходил в офис.", english="Yesterday I went to the office."),
+                Drill(
+                    russian="Мы выпустили релиз в пятницу.",
+                    english="We shipped the release on Friday.",
+                ),
+            ],
         )
         score = Score(score=6, comment="Норм.")
         return AnalysisResult(
@@ -218,8 +231,6 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         topics = {t["key"]: t for t in response.json()["topics"]}
         self.assertEqual(set(topics), set(TOPIC_TAXONOMY.keys()))
-        self.assertTrue(topics["articles"]["has_cloze"])
-        self.assertFalse(topics["verb_tense"]["has_cloze"])
         self.assertTrue(topics["articles"]["resources"][0]["url"].startswith("https://"))
         self.assertEqual(topics["other"]["resources"], [])
 
@@ -487,33 +498,103 @@ class ApiTests(unittest.TestCase):
     def test_items_carry_their_exercise_format(self) -> None:
         self._analyzed_session()
         item = self.client.get("/api/learner/items").json()["items"][0]
-        self.assertEqual(item["exercise"], {"type": "type", "accept": ["I went", "I went there."]})
-        queue = self.client.get("/api/learner/queue").json()
-        self.assertEqual(queue["new"][0]["exercise"]["type"], "type")
-
-    def test_cloze_texts_and_topic_drill_attempt(self) -> None:
-        session_id = self._analyzed_session()
-        texts = self.client.get("/api/learner/texts", params={"topic": "articles"}).json()["texts"]
-        self.assertEqual(texts[0]["session_id"], session_id)
-        self.assertEqual([s["gap"] for s in texts[0]["segments"] if "gap" in s], ["the"])
         self.assertEqual(
-            self.client.get("/api/learner/texts", params={"topic": "verb_tense"}).status_code, 404
+            item["exercise"],
+            {
+                "type": "translate",
+                "drill": 0,
+                "russian": "Вчера я ходил в офис.",
+                "reference": "Yesterday I went to the office.",
+                "focus": "",
+            },
         )
-
-        passed = self.client.post(
+        self.assertEqual(
+            item["content"]["drills"][1]["english"], "We shipped the release on Friday."
+        )
+        queue = self.client.get("/api/learner/queue").json()
+        self.assertEqual(queue["new"][0]["exercise"]["type"], "translate")
+        # After one attempt the card moves on to its next sentence.
+        self.client.post(
             "/api/learner/attempts",
-            json={"topic": "articles", "exercise": "cloze", "score": 0.9, "session_id": session_id},
+            json={"item_id": item["id"], "exercise": "card_translate", "correct": False},
+        )
+        item = self.client.get("/api/learner/items").json()["items"][0]
+        self.assertEqual(item["exercise"]["drill"], 1)
+
+    def test_old_mistakes_without_practice_sentences_are_retired(self) -> None:
+        session_id = self._analyzed_session()
+        path = config.recordings_dir() / session_id / config.ANALYSIS_FILENAME
+        analysis = json.loads(path.read_text(encoding="utf-8"))
+        del analysis["issues"][0]["drills"]  # an analysis from before schema v4
+        path.write_text(json.dumps(analysis), encoding="utf-8")
+        learner_store.refresh_after_analysis()
+
+        self.assertEqual(self.client.get("/api/learner/items").json()["count"], 0)
+        self.assertEqual(self.client.get("/api/learner/queue").json()["new"], [])
+        topics = self.client.get("/api/learner/topics").json()["topics"]
+        self.assertEqual(next(t for t in topics if t["key"] == "verb_tense")["items"], 0)
+        # The bank still has it, so earlier attempts keep their topic.
+        self.assertEqual(len(learner_store.load_item_bank()["items"]), 1)
+
+    # ---------------------------------------------------------- card checks
+    def _card(self) -> Dict:
+        self._analyzed_session()
+        return self.client.get("/api/learner/items").json()["items"][0]
+
+    def test_a_card_answer_is_checked_by_claude_once(self) -> None:
+        item = self._card()
+        url = f"/api/learner/cards/{item['id']}/check"
+        first = self.client.post(url, json={"drill": 0, "answer": "I have gone to the office"})
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual((first.json()["graded_by"], first.json()["correct"]), ("claude", True))
+        (graded,) = self.fake_generator.graded[0]
+        self.assertEqual(graded.russian, "Вчера я ходил в офис.")
+        self.assertEqual(graded.reference, "Yesterday I went to the office.")
+        self.assertIn("I went", graded.focus)  # no pattern: the fix itself is the focus
+
+        again = self.client.post(url, json={"drill": 0, "answer": "i have gone to the office!"})
+        self.assertEqual(again.json()["graded_by"], "cache")
+        self.assertEqual(len(self.fake_generator.graded), 1)
+        usage = self.client.get("/api/usage").json()["by_purpose"]
+        self.assertEqual(usage["anthropic:card_grading"]["calls"], 1)
+        # The check logs no attempt: the browser posts it, so it can overrule.
+        self.assertEqual(learner_store.load_attempts(), [])
+
+    def test_an_exact_or_empty_answer_needs_no_call(self) -> None:
+        item = self._card()
+        url = f"/api/learner/cards/{item['id']}/check"
+        exact = self.client.post(
+            url, json={"drill": 1, "answer": "we shipped the release on friday"}
+        )
+        self.assertEqual((exact.json()["graded_by"], exact.json()["correct"]), ("match", True))
+        empty = self.client.post(url, json={"drill": 0, "answer": "  "})
+        self.assertEqual((empty.json()["graded_by"], empty.json()["correct"]), ("empty", False))
+        self.assertEqual(self.fake_generator.graded, [])
+
+    def test_card_check_errors(self) -> None:
+        item = self._card()
+        url = f"/api/learner/cards/{item['id']}/check"
+        self.assertEqual(self.client.post(url, json={"drill": 5, "answer": "x"}).status_code, 400)
+        unknown = self.client.post(
+            "/api/learner/cards/fix-000000000000/check", json={"drill": 0, "answer": "x"}
+        )
+        self.assertEqual(unknown.status_code, 404)
+        self.fake_generator.fail_grading = MissingAnthropicApiKeyError("Нет ключа.")
+        self.assertEqual(self.client.post(url, json={"drill": 0, "answer": "x"}).status_code, 400)
+        self.fake_generator.fail_grading = AnalysisError("Сеть.")
+        self.assertEqual(self.client.post(url, json={"drill": 0, "answer": "x"}).status_code, 502)
+
+    def test_topic_drill_attempt_derives_correct_from_its_score(self) -> None:
+        passed = self.client.post(
+            "/api/learner/attempts", json={"topic": "articles", "exercise": "ai_set", "score": 0.9}
         )
         self.assertEqual(passed.status_code, 201, passed.text)
         self.assertTrue(passed.json()["attempt"]["correct"])
         failed = self.client.post(
             "/api/learner/attempts",
-            json={"topic": "articles", "exercise": "cloze", "score": 0.5, "correct": True},
+            json={"topic": "articles", "exercise": "ai_set", "score": 0.5, "correct": True},
         )
         self.assertFalse(failed.json()["attempt"]["correct"])  # derived from the score
-
-        texts = self.client.get("/api/learner/texts", params={"topic": "articles"}).json()["texts"]
-        self.assertEqual((texts[0]["attempts"], texts[0]["best_score"]), (1, 0.9))
         articles = next(
             t for t in self.client.get("/api/learner/topics").json()["topics"]
             if t["key"] == "articles"
@@ -564,31 +645,23 @@ class ApiTests(unittest.TestCase):
     def test_today_workout_tracks_each_step(self) -> None:
         session_id = self._analyzed_session()
         body = self.client.get("/api/learner/today").json()
-        cards, drill, live, dictation_step = body["steps"]
+        cards, live, dictation_step = body["steps"]
         self.assertEqual((cards["status"], cards["queue_total"]), ("todo", 1))
-        self.assertEqual((drill["kind"], drill["status"]), ("cloze", "todo"))
-        self.assertEqual(drill["topic"]["key"], "articles")
-        self.assertEqual(drill["text"]["session_id"], session_id)
         self.assertEqual((live["status"], live["session_id"]), ("done", session_id))
         self.assertEqual(body["focus_topic"]["key"], "verb_tense")
         self.assertEqual(body["streak_days"], 1)
 
         self.client.post(
             "/api/learner/attempts",
-            json={"item_id": cards["items"][0]["id"], "exercise": "card_type", "correct": True},
-        )
-        self.client.post(
-            "/api/learner/attempts",
-            json={"topic": "articles", "exercise": "cloze", "score": 1.0, "session_id": session_id},
+            json={"item_id": cards["items"][0]["id"], "exercise": "card_translate", "correct": True},
         )
         body = self.client.get("/api/learner/today").json()
-        self.assertEqual([s["status"] for s in body["steps"]], ["done", "done", "done", "empty"])
+        self.assertEqual([s["status"] for s in body["steps"]], ["done", "done", "empty"])
         self.assertEqual(dictation_step["kind"], "dictation")
         self.assertEqual(body["minutes_left"], 0)
 
         history = self.client.get("/api/learner/history").json()["days"]
         self.assertEqual((history[0]["cards"], history[0]["cards_correct"]), (1, 1))
-        self.assertEqual(history[0]["drills"][0]["label"], "Артикли (a / an / the)")
 
     def test_a_picture_description_fills_the_live_step(self) -> None:
         def live_step() -> Dict:
@@ -872,17 +945,19 @@ class ApiTests(unittest.TestCase):
         }
         body = self._submit(set_id, answers)
         self.assertEqual(body["run"]["correct"], 0)
-        self.assertEqual(body["new_cards"], 3)  # the blank translation makes none
+        # Only the translation has a Russian sentence to practise: gap and fix
+        # mistakes stay as retired history, the blank translation makes nothing.
+        self.assertEqual(body["new_cards"], 1)
         empty = next(r for r in body["run"]["results"] if r["exercise_id"] == "ex4")
         self.assertEqual(
             (empty["graded_by"], empty["corrected"]), ("empty", "We had a call yesterday.")
         )
 
         queue = self.client.get("/api/learner/queue").json()
-        corrections = {item["content"]["correction"] for item in queue["new"]}
-        self.assertIn("I have already fixed the bug.", corrections)
-        self.assertIn("Yesterday we shipped it.", corrections)
-        self.assertTrue(all(item["origin"] == "ai_set" for item in queue["new"]))
+        from_set = [item for item in queue["new"] if item.get("origin") == "ai_set"]
+        self.assertEqual(len(from_set), 1)
+        self.assertEqual(from_set[0]["content"]["correction"], "I have already fixed the bug.")
+        self.assertEqual(from_set[0]["exercise"]["russian"], "Я уже починил баг.")
 
         again = self._submit(set_id, answers)
         self.assertEqual(len(self.fake_generator.graded), 1)  # verdict came from the cache
@@ -917,7 +992,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(step["topic"]["key"], "verb_tense")
         self.assertIsNone(step["set_id"])
         self.assertEqual(step["cost_usd"], config.SET_COST_ESTIMATE_USD)
-        self.assertEqual(body["minutes_left"], 3)  # the cloze only: the set is optional
+        self.assertEqual(body["minutes_left"], 0)  # one card (~0.5 min); the set is optional
 
         # Without a key the step only shows for a set that is already paid for.
         steps = self.client.get("/api/learner/today").json()["steps"]
@@ -1108,6 +1183,141 @@ class DictationApiTests(unittest.TestCase):
 
         self.assertEqual(deleted["deleted"], "dQw4w9WgXcQ")
         self.assertEqual(self.client.get("/api/dictation/lessons").json()["lessons"], [])
+
+
+class FakeTranslator:
+    """Splits every lesson at sentences 9 and 19; reviews every text as "fair"."""
+
+    has_api_key = True
+
+    def __init__(self) -> None:
+        self.splits: List[List[str]] = []
+        self.reviews: List[Dict] = []
+        self.error: Optional[Exception] = None
+
+    def split(self, sentences) -> SplitResult:
+        if self.error is not None:
+            raise self.error
+        self.splits.append(list(sentences))
+        usage = {"input_tokens": 3_000, "output_tokens": 40}
+        return SplitResult(starts=[9, 19], call=ClaudeCall(config.TRANSLATION_MODEL, usage))
+
+    def review(self, sentences, translation, *, subtitle_language="en") -> ReviewResult:
+        if self.error is not None:
+            raise self.error
+        self.reviews.append(
+            {"sentences": list(sentences), "text": translation, "language": subtitle_language}
+        )
+        usage = {"input_tokens": 700, "output_tokens": 400}
+        review = {"quality": "fair", "summary": "Норм.", "issues": [], "model_translation": "x"}
+        return ReviewResult(review=review, call=ClaudeCall(config.TRANSLATION_MODEL, usage))
+
+
+class DictationTranslationApiTests(unittest.TestCase):
+    """Cutting a lesson into parts and reviewing translations, with fakes."""
+
+    URL = DictationApiTests.URL
+    LESSON = "/api/dictation/lessons/dQw4w9WgXcQ"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base_dir_patch = patch.object(config, "base_dir", return_value=Path(self._tmp.name))
+        base_dir_patch.start()
+        self.addCleanup(base_dir_patch.stop)
+        self.fetcher = FakeFetcher()
+        self.fetcher.VTT = "WEBVTT\n\n" + "".join(
+            f"00:{n * 4 // 60:02d}:{n * 4 % 60:02d}.000 --> "
+            f"00:{n * 4 // 60:02d}:{n * 4 % 60 + 3:02d}.000\n"
+            f"Sentence number {n} is about deployment today.\n\n"
+            for n in range(30)
+        )
+        self.translator = FakeTranslator()
+        fastapi_app.dependency_overrides[api.get_fetcher_factory] = lambda: (lambda: self.fetcher)
+        fastapi_app.dependency_overrides[api.get_translator_factory] = lambda: (
+            lambda: self.translator
+        )
+        self.addCleanup(fastapi_app.dependency_overrides.clear)
+        self.client = TestClient(fastapi_app)
+        self.client.post("/api/dictation/lessons", json={"url": self.URL})
+
+    def test_a_long_lesson_needs_one_split_call_and_keeps_the_result(self) -> None:
+        lesson = self.client.get(self.LESSON).json()
+        self.assertEqual(len(lesson["sentences"]), 30)
+        self.assertTrue(lesson["translation"]["needs_split"])
+
+        body = self.client.post(f"{self.LESSON}/parts").json()
+
+        self.assertFalse(body["needs_split"])
+        self.assertEqual([p["sentences"] for p in body["parts"]], [9, 10, 11])
+        self.assertTrue(body["parts"][0]["text"].startswith("Sentence number 0 is"))
+        # The cut is cached: asking again is free, force pays for a new one.
+        self.client.post(f"{self.LESSON}/parts")
+        self.assertEqual(len(self.translator.splits), 1)
+        self.client.post(f"{self.LESSON}/parts?force=true")
+        self.assertEqual(len(self.translator.splits), 2)
+        usage = self.client.get("/api/usage").json()
+        self.assertEqual(usage["by_purpose"]["anthropic:dictation_split"]["calls"], 2)
+
+    def test_a_translation_is_reviewed_stored_and_not_paid_for_twice(self) -> None:
+        self.client.post(f"{self.LESSON}/parts")
+
+        first = self.client.post(f"{self.LESSON}/parts/1/translation", json={"text": " Перевод. "})
+        again = self.client.post(f"{self.LESSON}/parts/1/translation", json={"text": "Перевод."})
+
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(first.json()["translation"]["review"]["quality"], "fair")
+        self.assertTrue(again.json()["cached"])
+        self.assertEqual(len(self.translator.reviews), 1)
+        self.assertEqual(len(self.translator.reviews[0]["sentences"]), 10)
+        self.assertEqual(self.translator.reviews[0]["language"], "en")
+        shown = self.client.get(self.LESSON).json()["translation"]["parts"][1]["translation"]
+        self.assertEqual(shown["text"], "Перевод.")
+        usage = self.client.get("/api/usage").json()
+        self.assertEqual(usage["by_purpose"]["anthropic:dictation_translation"]["calls"], 1)
+        # Translation results stay out of the learner model.
+        self.assertEqual(self.client.get("/api/learner/items").json()["count"], 0)
+
+    def test_a_failed_review_still_keeps_the_text(self) -> None:
+        self.client.post(f"{self.LESSON}/parts")
+        self.translator.error = AnalysisError("Claude недоступен")
+
+        response = self.client.post(f"{self.LESSON}/parts/0/translation", json={"text": "Мой текст"})
+
+        self.assertEqual(response.status_code, 502)
+        shown = self.client.get(self.LESSON).json()["translation"]["parts"][0]["translation"]
+        self.assertEqual((shown["text"], shown["review"]), ("Мой текст", None))
+        # The same text is reviewed on the next try, since nothing was graded.
+        self.translator.error = None
+        retry = self.client.post(f"{self.LESSON}/parts/0/translation", json={"text": "Мой текст"})
+        self.assertEqual(retry.status_code, 201)
+        self.assertFalse(retry.json()["cached"])
+
+    def test_a_missing_key_is_a_400_and_bad_parts_are_refused(self) -> None:
+        self.translator.error = MissingAnthropicApiKeyError("no key")
+        self.assertEqual(self.client.post(f"{self.LESSON}/parts").status_code, 400)
+        self.translator.error = None
+
+        # Not cut yet: a translation has no part to belong to.
+        early = self.client.post(f"{self.LESSON}/parts/0/translation", json={"text": "x"})
+        self.assertEqual(early.status_code, 409)
+        self.client.post(f"{self.LESSON}/parts")
+        late = self.client.post(f"{self.LESSON}/parts/7/translation", json={"text": "x"})
+        self.assertEqual(late.status_code, 404)
+        blank = self.client.post(f"{self.LESSON}/parts/0/translation", json={"text": "   "})
+        self.assertEqual(blank.status_code, 400)
+        self.assertEqual(self.translator.reviews, [])
+
+    def test_a_lesson_that_fits_one_part_is_never_split_by_the_model(self) -> None:
+        fetcher = FakeFetcher()  # two sentences
+        fastapi_app.dependency_overrides[api.get_fetcher_factory] = lambda: (lambda: fetcher)
+        self.client.delete(self.LESSON)
+        self.client.post("/api/dictation/lessons", json={"url": self.URL})
+
+        body = self.client.post(f"{self.LESSON}/parts").json()
+
+        self.assertEqual([p["sentences"] for p in body["parts"]], [2])
+        self.assertEqual(self.translator.splits, [])
 
 
 class SessionDirectoryGuardTests(unittest.TestCase):

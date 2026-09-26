@@ -16,6 +16,7 @@ from app.analyzer import (  # noqa: E402
     AnalysisError,
     ClaudeAnalyzer,
     ImageInput,
+    Issue,
     MissingAnthropicApiKeyError,
     PictureAnalysis,
     SpeechAnalysis,
@@ -124,6 +125,15 @@ class ClaudeAnalyzerTests(unittest.TestCase):
         ):
             self.assertIn(field_name, system)
         self.assertGreaterEqual(messages.captured["max_tokens"], 16_000)
+
+    def test_prompt_asks_for_new_practice_sentences_per_mistake(self) -> None:
+        # Cards are built from these, not from the verbatim quote (2026-09-26).
+        analyzer, messages = make_analyzer()
+        analyzer.analyze("Yesterday I go to the store.", config.default_profile(), 5.0)
+        system = messages.captured["system"]
+        self.assertIn(f"`drills`: {config.DRILLS_PER_ISSUE} practice sentences", system)
+        self.assertIn("never the speaker's own sentence", system)
+        self.assertIn("drills", Issue.model_json_schema()["properties"])
 
     def test_successful_analysis_returns_topic_counts(self) -> None:
         analyzer, _ = make_analyzer()

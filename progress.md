@@ -33,6 +33,36 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
 
 ## Done
 
+- **2026-09-26 — Mistake cards rebuilt: new sentences, checked by Claude.** The old cards
+  showed the verbatim quote (a scramble / typed correction, or a self-graded long fragment):
+  a week later a short quote had no context left, and a long one hid which problem was meant.
+  Decided with the user:
+  - Every English mistake in an analysis now carries 3 **new practice sentences**
+    (`issues[].drills`, analysis schema v4): a Russian sentence in a different situation whose
+    natural English needs exactly the construction that went wrong. Written in the same
+    analysis call (no extra call, a bit more output). A card is **«Скажите по-английски»**;
+    each attempt moves to the next sentence, and the pattern rule is a hidden «Подсказка».
+  - The answer is checked by **Claude (Haiku 4.5)** — `POST /api/learner/cards/<id>/check`,
+    usage purpose `card_grading`, a fraction of a cent. An exact match of the reference or an
+    empty answer costs nothing; verdicts are cached in `data/card_verdicts.jsonl` by sentence +
+    answer. The browser still logs the attempt, so «Засчитать как верный» overrules Claude;
+    if the check fails (no key, network) the learner grades against the reference.
+  - Only after answering, the card shows where it came from: «Из вашей записи от …» with the
+    quote ❌, the correction ✅, the explanation and a link to the recording.
+  - **Old mistake cards are switched off** (the user's choice): a fix without drills — every
+    analysis before today, Russian mistakes, gap/fix mistakes of AI sets — stays in the bank as
+    history (its attempts still count for topic accuracy) but never reaches a queue or a list.
+    A wrong **translation** in an AI set becomes a live card with the set's own Russian sentence.
+    Item bank schema v3.
+  - **Cloze on `improved_version` removed** (from «Сегодня», «Занятия» and the topic page,
+    `GET /api/learner/texts`, `has_cloze`): gaps in a text you remember test memory of that
+    text, not the rule. Old cloze attempts stay in the log and in «История».
+  - Scramble and typed-recall card formats are gone; phrase gaps and pattern/phrase
+    self-graded cards are unchanged. 228 tests, all offline.
+  - **Still to check:** the quality of generated sentences and Haiku's verdicts on real
+    answers; the real extra cost of drills in the analysis. Re-analysing an old recording
+    (`force`) gives it cards again, at the price of an analysis.
+
 - **2026-09-20 — Stage 7: listening dictation from YouTube ($0).** «Диктант» (`#/dictation`)
   under «Занятия»: paste a YouTube link, and the video becomes a lesson — its audio plus the
   sentences of its **own subtitle track**. Modelled on ear2finger (researched with the user
@@ -233,6 +263,19 @@ Done 2026-09-19 — see «Done» above.
 ## Stage 6 — Spoken drills (Deepgram only)
 
 Done 2026-09-20 — see «Done» above.
+
+- **2026-09-26 — Dictation translation task (Haiku, ≈ 0.5 ¢ per call).** Under a dictation
+  lesson: translate what you heard, part by part, and get a review. Decided with the user:
+  the cut into parts is a **model call** (Haiku returns only the sentence indices where a new
+  part starts; `dictation.plan_parts` repairs them into 5–15-sentence parts; a lesson that
+  fits one part costs nothing), the direction is English → Russian (Russian video → English),
+  and mistakes are **not** sent anywhere — no item bank, no attempts — they stay in the lesson.
+  - One review call per part: the source sentences + the learner's translation in, a quality
+    label, a Russian summary, issues (source / your words / problem / better) and a model
+    translation out. No reference translation is generated first. The text is saved before the
+    call; the same text again reuses the stored review.
+  - Files: `parts.json`, `translations.jsonl` in the lesson folder. API: `POST
+    /api/dictation/lessons/<id>/parts`, `POST .../parts/<n>/translation`. UI: `js/translation.js`.
 
 ## Stage 7 — Listening dictation from YouTube
 
