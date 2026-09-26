@@ -21,12 +21,60 @@ const Api = (() => {
     getSession: (id) => request(`/api/sessions/${encodeURIComponent(id)}`),
     getProgress: () => request("/api/progress"),
     getTopics: () => request("/api/topics"),
+    getCurriculum: () => request("/api/curriculum"),
+    // A lesson's theory (latest version unless `version`); writing one is paid.
+    getTheory: (lessonId, version = null) =>
+      request(
+        `/api/lessons/${encodeURIComponent(lessonId)}/theory${version == null ? "" : `?version=${version}`}`
+      ),
+    writeTheory: (lessonId) =>
+      request(`/api/lessons/${encodeURIComponent(lessonId)}/theory`, { method: "POST" }),
+    // A module's entry test: writing one is paid; answers are graded on the server.
+    getModuleTest: (moduleKey, testId = null) =>
+      request(
+        `/api/modules/${encodeURIComponent(moduleKey)}/test${testId ? `?test=${encodeURIComponent(testId)}` : ""}`
+      ),
+    createModuleTest: (moduleKey) =>
+      request(`/api/modules/${encodeURIComponent(moduleKey)}/test`, { method: "POST" }),
+    submitModuleTest: (moduleKey, testId, answers) =>
+      request(
+        `/api/modules/${encodeURIComponent(moduleKey)}/test/${encodeURIComponent(testId)}/submit`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ answers }),
+        }
+      ),
+    markModuleKnown: (moduleKey, lessons) =>
+      request(`/api/modules/${encodeURIComponent(moduleKey)}/mark-known`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lessons }),
+      }),
+    // A lesson's spoken tasks; writing more is a paid Haiku click in a context.
+    getLessonTasks: (lessonId) => request(`/api/lessons/${encodeURIComponent(lessonId)}/tasks`),
+    writeLessonTasks: (lessonId, theme) =>
+      request(`/api/lessons/${encodeURIComponent(lessonId)}/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ theme }),
+      }),
+    // The roadmap with lesson statuses; a mark is "skipped", "known" or null (clear).
+    getRoadmap: () => request("/api/roadmap"),
+    getRoadmapLesson: (lessonId) => request(`/api/roadmap/lessons/${encodeURIComponent(lessonId)}`),
+    markLesson: (lessonId, mark) =>
+      request(`/api/roadmap/lessons/${encodeURIComponent(lessonId)}/mark`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mark }),
+      }),
 
     // `kind` is "monologue", "picture", "talk" or "shadowing"; a picture take
     // also sends `image`, a drill take what it practises (`drill`: talk -
-    // prompt_index and, from round 2, series; shadowing - source_session_id
+    // prompt_id and, from round 2, series; shadowing - source_session_id
     // and passage).
-    uploadSession: (blob, { language, durationSeconds, mimeType, kind, image, drill }) => {
+    // A lesson's spoken task also sends `lesson` ({lesson_id, task_id}).
+    uploadSession: (blob, { language, durationSeconds, mimeType, kind, image, drill, lesson }) => {
       const form = new FormData();
       const extension = (mimeType || "").includes("ogg") ? "webm" : "webm";
       form.append("file", blob, `audio.${extension}`);
@@ -35,7 +83,7 @@ const Api = (() => {
       form.append("mime_type", mimeType || blob.type || "");
       if (kind) form.append("kind", kind);
       if (image) form.append("image", image, "image.jpg");
-      Object.entries(drill || {}).forEach(([key, value]) => {
+      Object.entries({ ...(drill || {}), ...(lesson || {}) }).forEach(([key, value]) => {
         if (value != null) form.append(key, String(value));
       });
       return request("/api/sessions", { method: "POST", body: form });
@@ -86,11 +134,12 @@ const Api = (() => {
     listSets: (topic) =>
       request(`/api/practice/sets${topic ? `?topic=${encodeURIComponent(topic)}` : ""}`),
     getSet: (id) => request(`/api/practice/sets/${encodeURIComponent(id)}`),
-    createSet: (topic, force = false) =>
+    // `theme` is the picker's choice ({key} or {label}); null = the last one used.
+    createSet: (topic, force = false, theme = null) =>
       request("/api/practice/sets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, force }),
+        body: JSON.stringify({ topic, force, theme }),
       }),
     submitSet: (id, answers, context) =>
       request(`/api/practice/sets/${encodeURIComponent(id)}/submit`, {
@@ -128,12 +177,32 @@ const Api = (() => {
         body: JSON.stringify({ text }),
       }),
 
-    analyzeSession: (id, force = false) =>
+    analyzeSession: (id, force = false, theme = null) =>
       request(`/api/sessions/${encodeURIComponent(id)}/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force }),
+        body: JSON.stringify({ force, theme }),
       }),
+
+    // Contexts «уклон» (js/themes.js): built-in and own ones, the last used.
+    getThemes: () => request("/api/themes"),
+    addTheme: (label) =>
+      request("/api/themes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label }),
+      }),
+    deleteTheme: (key) => request(`/api/themes/${encodeURIComponent(key)}`, { method: "DELETE" }),
+    setLastTheme: (theme) =>
+      request("/api/themes/last", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(theme),
+      }),
+    getThemePrompts: (key) => request(`/api/themes/${encodeURIComponent(key)}/prompts`),
+    // Paid (Haiku, ~0.1 ¢): speaking prompts for an own context.
+    writeThemePrompts: (key) =>
+      request(`/api/themes/${encodeURIComponent(key)}/prompts`, { method: "POST" }),
   };
 })();
 
@@ -213,6 +282,7 @@ async function renderAnalysis(container, analysis) {
     ${renderStrengths(analysis.strengths)}
     <h3>Разбор</h3>
     ${issueCards.join("") || '<p class="muted">Заметных ошибок не найдено — отличная запись!</p>'}
+    ${renderLessonCheck(analysis.lesson)}
     ${renderNotMentioned(analysis.not_mentioned)}
     ${renderPhraseSection("Полезные слова для этой сцены", analysis.scene_vocabulary)}
     ${renderPhraseSection("Слова и выражения", analysis.vocabulary)}
@@ -220,6 +290,35 @@ async function renderAnalysis(container, analysis) {
     ${renderPhraseSection("Что запомнить из этой записи", analysis.takeaways)}
     ${renderScores(analysis.scores, analysis.overall_score, analysis.input_mode === "text")}
   `;
+}
+
+// A lesson's spoken task (Stage 8, R6): how well the lesson's rule was used.
+function renderLessonCheck(lesson) {
+  const check = lesson && lesson.check;
+  if (!check) return "";
+  return `
+    <h3>Правило урока</h3>
+    <div class="issue-card">
+      <p><strong>${escapeHtml(check.score)}/10</strong> — ${escapeHtml(check.verdict)}</p>
+      ${
+        check.good_uses && check.good_uses.length
+          ? `<p class="muted">Получилось:</p><ul>${check.good_uses
+              .map((q) => `<li class="correction">✅ «${escapeHtml(q)}»</li>`)
+              .join("")}</ul>`
+          : ""
+      }
+      ${
+        check.missed && check.missed.length
+          ? `<p class="muted">Здесь правило было нужно:</p>${check.missed
+              .map(
+                (m) => `<p class="quote">❌ «${escapeHtml(m.quote)}»</p>
+                        <p class="correction">✅ ${escapeHtml(m.better)}</p>`
+              )
+              .join("")}`
+          : ""
+      }
+      ${lesson.id ? `<p><a href="#/practice/${encodeURIComponent(lesson.id)}">← К уроку</a></p>` : ""}
+    </div>`;
 }
 
 function renderNotMentioned(items) {
@@ -249,7 +348,8 @@ async function renderIssue(issue) {
   return `
     <div class="issue-card">
       <span class="pill ${severityClass}">${escapeHtml(severityText)}</span>
-      <span class="muted"> · ${escapeHtml(label)}</span>
+      <span class="muted"> · <a href="#/practice/${encodeURIComponent(issue.topic)}"
+        title="Теория, упражнения и карточки по этой теме">${escapeHtml(label)}</a></span>
       <p class="quote">❌ «${escapeHtml(issue.quote)}»</p>
       <p>${escapeHtml(issue.explanation)}</p>
       <p class="correction">✅ ${escapeHtml(issue.correction)}</p>

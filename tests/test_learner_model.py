@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import config, learner_model  # noqa: E402
+from app import learner_model  # noqa: E402
 from app.learner_model import KIND_FIX, KIND_PATTERN, KIND_PHRASE  # noqa: E402
 from app.utils import AnalysedSession  # noqa: E402
 
@@ -25,7 +25,7 @@ def issue(
     correction: str,
     *,
     quote: str = "some wrong words",
-    topic: str = "prepositions",
+    topic: str = "prepositions_time_place",
     rule: str = "",
     drills: Any = None,
 ) -> Dict[str, Any]:
@@ -84,13 +84,16 @@ class BankTests(unittest.TestCase):
         kinds = {item["kind"]: item for item in items}
         self.assertEqual(set(kinds), {KIND_FIX, KIND_PATTERN})
         self.assertEqual(kinds[KIND_FIX]["pattern_id"], kinds[KIND_PATTERN]["id"])
-        self.assertEqual(kinds[KIND_FIX]["topic"], "prepositions")
+        self.assertEqual(kinds[KIND_FIX]["topic"], "prepositions_time_place")
         self.assertEqual(
             kinds[KIND_FIX]["occurrences"], [{"session_id": "s1", "at": DAY1.isoformat()}]
         )
         self.assertEqual(kinds[KIND_FIX]["content"]["drills"], [DRILL])
         self.assertEqual(kinds[KIND_FIX]["content"]["focus"], "responsible for + noun")
+        self.assertEqual(kinds[KIND_FIX]["content"]["focus_examples"], ["Example."])
         self.assertFalse(learner_model.is_retired(kinds[KIND_FIX]))
+        # The rule is drilled through its mistake card; it is no card of its own.
+        self.assertTrue(learner_model.is_retired(kinds[KIND_PATTERN]))
 
     def test_a_fix_without_practice_sentences_is_retired(self) -> None:
         # Analyses from before 2026-09-26 (and non-English mistakes) have no
@@ -102,6 +105,18 @@ class BankTests(unittest.TestCase):
         self.assertTrue(learner_model.is_retired(old))
         self.assertEqual(new["content"]["drills"], [{"russian": "Иду.", "english": "I go."}])
         self.assertFalse(learner_model.is_retired({"kind": KIND_PHRASE, "content": {}}))
+
+    def test_grammar_notes_among_phrases_are_retired(self) -> None:
+        def phrase(text: str, example: str, sources) -> Dict[str, Any]:
+            content = {"phrase": text, "meaning": "m", "example": example}
+            return {"kind": KIND_PHRASE, "sources": sources, "content": content}
+
+        retired = learner_model.is_retired
+        self.assertTrue(retired(phrase("a few + noun", "A few people.", ["vocabulary"])))
+        self.assertTrue(retired(phrase("parallel structure in lists", "I cook, clean.", ["takeaways"])))
+        # A gap keeps a takeaway; a plain word is recalled from its meaning.
+        self.assertFalse(retired(phrase("on a leash", "The dog is on a leash.", ["takeaways"])))
+        self.assertFalse(retired(phrase("windowsill", "A cat sits there.", ["vocabulary"])))
 
     def test_delivery_topics_and_no_op_fixes_do_not_become_cards(self) -> None:
         analysis = {
@@ -222,8 +237,8 @@ class LeitnerTests(unittest.TestCase):
 class TopicMasteryTests(unittest.TestCase):
     def test_priority_scales_speech_weakness_by_drill_accuracy(self) -> None:
         bank = {
-            "fix-a": {"id": "fix-a", "topic": "articles"},
-            "fix-b": {"id": "fix-b", "topic": "prepositions"},
+            "fix-a": {"id": "fix-a", "topic": "articles_basic"},
+            "fix-b": {"id": "fix-b", "topic": "prepositions_time_place"},
         }
         attempts = [
             {"item_id": "fix-a", "ts": day(2).isoformat(), "correct": True},
@@ -231,36 +246,60 @@ class TopicMasteryTests(unittest.TestCase):
             {"item_id": "fix-b", "ts": day(2).isoformat(), "correct": False},
         ]
         rows = learner_model.topic_mastery(
-            {"articles": 4.0, "prepositions": 2.0, "verb_tense": 1.0},
+            {"articles_basic": 4.0, "prepositions_time_place": 2.0, "present_perfect": 1.0},
             bank,
             attempts,
             {},
             dt.date(2026, 9, 4),
         )
         by_key = {row["key"]: row for row in rows}
-        self.assertEqual(by_key["articles"]["accuracy"], 1.0)
-        self.assertAlmostEqual(by_key["articles"]["priority"], 2.0)  # 4 * 0.5
-        self.assertAlmostEqual(by_key["prepositions"]["priority"], 3.0)  # 2 * 1.5
-        self.assertIsNone(by_key["verb_tense"]["accuracy"])
-        self.assertAlmostEqual(by_key["verb_tense"]["priority"], 1.0)
-        self.assertEqual([row["key"] for row in rows], ["prepositions", "articles", "verb_tense"])
+        self.assertEqual(by_key["articles_basic"]["accuracy"], 1.0)
+        self.assertAlmostEqual(by_key["articles_basic"]["priority"], 2.0)  # 4 * 0.5
+        self.assertAlmostEqual(by_key["prepositions_time_place"]["priority"], 3.0)  # 2 * 1.5
+        self.assertIsNone(by_key["present_perfect"]["accuracy"])
+        self.assertAlmostEqual(by_key["present_perfect"]["priority"], 1.0)
+        self.assertEqual(
+            [row["key"] for row in rows],
+            ["prepositions_time_place", "articles_basic", "present_perfect"],
+        )
 
     def test_topic_drills_count_towards_accuracy_by_their_score(self) -> None:
-        bank = {"fix-a": {"id": "fix-a", "topic": "articles"}}
+        bank = {"fix-a": {"id": "fix-a", "topic": "articles_basic"}}
         attempts = [
             {"item_id": "fix-a", "ts": day(2).isoformat(), "correct": True},
-            {"topic": "articles", "ts": day(3).isoformat(), "correct": False, "score": 0.5},
+            {"topic": "articles_basic", "ts": day(3).isoformat(), "correct": False, "score": 0.5},
         ]
-        rows = learner_model.topic_mastery({"articles": 2.0}, bank, attempts, {}, day(4).date())
+        rows = learner_model.topic_mastery({"articles_basic": 2.0}, bank, attempts, {}, day(4).date())
         self.assertEqual(rows[0]["recent_attempts"], 2)
         self.assertAlmostEqual(rows[0]["accuracy"], 0.75)
         self.assertAlmostEqual(rows[0]["priority"], 1.5)  # 2 * (1.5 - 0.75)
+
+    def test_areas_add_up_their_topics_and_weigh_accuracy_by_answers(self) -> None:
+        def row(key: str, priority: float, attempts: int, accuracy: object) -> dict:
+            return {"key": key, "weakness_score": priority, "priority": priority,
+                    "recent_attempts": attempts, "accuracy": accuracy,
+                    "items": 2, "due_items": 1, "closed_items": 0}
+
+        areas = learner_model.area_mastery([
+            row("present_perfect", 1.0, 3, 1.0),
+            row("past_simple", 2.0, 1, 0.0),
+            row("articles_basic", 0.5, 0, None),
+            row("verb_tense", 0.2, 0, None),  # unknown (v1) key -> "other"
+        ])
+        by_key = {area["key"]: area for area in areas}
+        self.assertEqual([a["key"] for a in areas], ["tenses", "nouns_articles", "other"])
+        tenses = by_key["tenses"]
+        self.assertEqual(tenses["topics"], ["present_perfect", "past_simple"])
+        self.assertAlmostEqual(tenses["priority"], 3.0)
+        self.assertEqual((tenses["items"], tenses["due_items"], tenses["recent_attempts"]), (4, 2, 4))
+        self.assertAlmostEqual(tenses["accuracy"], 0.75)  # 3 of 4 answers
+        self.assertIsNone(by_key["nouns_articles"]["accuracy"])
 
 
 class DailyQueueTests(unittest.TestCase):
     TODAY = dt.date(2026, 9, 10)
 
-    def _bank(self, fixes: int, phrases: int, topic: str = "articles") -> Dict[str, Any]:
+    def _bank(self, fixes: int, phrases: int, topic: str = "articles_basic") -> Dict[str, Any]:
         bank = {}
         for n in range(fixes):
             bank[f"fix-{n:02d}"] = {
@@ -316,10 +355,10 @@ class DailyQueueTests(unittest.TestCase):
         self.assertEqual(len(queue["new"]), 7)
 
     def test_new_cards_from_higher_priority_topics_come_first(self) -> None:
-        bank = {**self._bank(fixes=1, phrases=0, topic="articles")}
-        bank["fix-zz"] = {**bank["fix-00"], "id": "fix-zz", "topic": "verb_tense"}
+        bank = {**self._bank(fixes=1, phrases=0, topic="articles_basic")}
+        bank["fix-zz"] = {**bank["fix-00"], "id": "fix-zz", "topic": "present_perfect"}
         queue = learner_model.daily_queue(
-            bank, self._states(bank), {"articles": 1.0, "verb_tense": 5.0}, self.TODAY
+            bank, self._states(bank), {"articles_basic": 1.0, "present_perfect": 5.0}, self.TODAY
         )
         self.assertEqual(queue["new"], ["fix-zz", "fix-00"])
 
@@ -328,6 +367,19 @@ class DailyQueueTests(unittest.TestCase):
         bank["fix-01"]["content"] = {"drills": []}
         yesterday = dt.datetime(2026, 9, 9, 12)
         attempts = {"fix-01": [attempt(yesterday, False)]}  # would be due today
+        queue = learner_model.daily_queue(bank, self._states(bank, attempts), {}, self.TODAY)
+        self.assertEqual((queue["reviews"], queue["new"], queue["new_waiting"]), ([], ["fix-00"], 0))
+
+    def test_rules_never_reach_the_queue(self) -> None:
+        bank = self._bank(fixes=1, phrases=0)
+        bank["pat-00"] = {
+            **bank["fix-00"],
+            "id": "pat-00",
+            "kind": KIND_PATTERN,
+            "content": {"rule": "for + noun", "examples": []},
+        }
+        yesterday = dt.datetime(2026, 9, 9, 12)
+        attempts = {"pat-00": [attempt(yesterday, False)]}  # would be due today
         queue = learner_model.daily_queue(bank, self._states(bank, attempts), {}, self.TODAY)
         self.assertEqual((queue["reviews"], queue["new"], queue["new_waiting"]), ([], ["fix-00"], 0))
 
@@ -364,10 +416,6 @@ class CardExerciseTests(unittest.TestCase):
 
     def test_fix_without_sentences_falls_back_to_self_grading(self) -> None:
         self.assertEqual(self._card(self._fix([])), {"type": "self"})
-
-    def test_pattern_is_self_graded(self) -> None:
-        pattern = {"kind": KIND_PATTERN, "content": {"rule": "help + verb", "examples": []}}
-        self.assertEqual(self._card(pattern), {"type": "self"})
 
     def test_phrase_found_in_its_example_becomes_a_gap(self) -> None:
         item = {
@@ -406,17 +454,11 @@ class WorkoutTests(unittest.TestCase):
         self.assertEqual(learner_model.activity_streak({dt.date(2026, 9, 8)}, today), 0)
         self.assertEqual(learner_model.activity_streak(set(), today), 0)
 
-    def test_prompt_changes_daily_and_stays_in_range(self) -> None:
-        first = learner_model.speaking_prompt_index(dt.date(2026, 9, 1))
-        second = learner_model.speaking_prompt_index(dt.date(2026, 9, 2))
-        self.assertNotEqual(first, second)
-        self.assertTrue(0 <= first < len(config.SPEAKING_PROMPTS))
-
     def test_daily_activity_sums_cards_and_lists_drills(self) -> None:
         attempts = [
             {"ts": day(1, 9).isoformat(), "item_id": "a", "correct": True},
             {"ts": day(1, 10).isoformat(), "item_id": "b", "correct": False},
-            {"ts": day(1, 11).isoformat(), "topic": "articles", "exercise": "ai_set",
+            {"ts": day(1, 11).isoformat(), "topic": "articles_basic", "exercise": "ai_set",
              "score": 0.75, "correct": False},
             {"ts": day(3).isoformat(), "item_id": "a", "correct": True},
         ]
@@ -434,7 +476,7 @@ if __name__ == "__main__":
 def exercise_set(results: List[Dict[str, Any]]) -> tuple:
     data = {
         "id": "set-20260901-120000",
-        "topic": "verb_tense",
+        "topic": "present_perfect",
         "language": "en",
         "exercises": [
             {"id": "ex1", "type": "gap", "before": "Yesterday we ", "after": " it.",
@@ -466,7 +508,7 @@ class ExerciseSetTests(unittest.TestCase):
         )
 
     def test_only_topics_a_set_can_train_are_allowed(self) -> None:
-        self.assertTrue(learner_model.set_topic_allowed("articles"))
+        self.assertTrue(learner_model.set_topic_allowed("articles_basic"))
         for topic in ("filler_words_fluency", "repetition_self_correction", "other", "nope"):
             self.assertFalse(learner_model.set_topic_allowed(topic))
 
@@ -499,9 +541,23 @@ class ExerciseSetTests(unittest.TestCase):
         self.assertEqual([learner_model.is_retired(i) for i in items], [True, True, False])
         for item in items:
             self.assertEqual(
-                (item["kind"], item["topic"], item["origin"]), (KIND_FIX, "verb_tense", "ai_set")
+                (item["kind"], item["topic"], item["origin"]), (KIND_FIX, "present_perfect", "ai_set")
             )
             self.assertEqual(item["occurrences"][0]["set_id"], "set-20260901-120000")
+
+    def test_a_translation_card_goes_to_the_topic_claude_tagged_its_mistake_with(self) -> None:
+        data, run = exercise_set([
+            {"exercise_id": "ex3", "answer": "It is already fixed bug.", "correct": False,
+             "corrected": "I have already fixed the bug.", "topic": "sentence_structure"},
+            {"exercise_id": "ex4", "answer": "We call.", "correct": False,
+             "corrected": "We had a call.", "topic": "not_a_topic"},
+            {"exercise_id": "ex2", "answer": "I go there yesterday.", "correct": False,
+             "topic": "articles_basic"},  # only a translation takes a verdict's topic
+        ])
+        items = learner_model.items_from_set_run(data, run)
+        self.assertEqual(
+            [i["topic"] for i in items], ["sentence_structure", "present_perfect", "present_perfect"]
+        )
 
     def test_right_answers_make_no_cards(self) -> None:
         data, run = exercise_set([{"exercise_id": "ex1", "answer": "shipped", "correct": True}])
@@ -509,7 +565,7 @@ class ExerciseSetTests(unittest.TestCase):
 
     def test_set_mistake_merges_into_a_speech_item_without_rewording_it(self) -> None:
         spoken = session("s1", DAY1, {"issues": [
-            issue("I went there yesterday.", quote="I go there yesterday", topic="verb_tense")
+            issue("I went there yesterday.", quote="I go there yesterday", topic="present_perfect")
         ]})
         data, run = exercise_set([
             {"exercise_id": "ex2", "answer": "I go there yesterday.", "correct": False}

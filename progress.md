@@ -33,6 +33,28 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
 
 ## Done
 
+- **2026-09-26 — Translations graded by Sonnet; a mistake is filed under its own topic.**
+  Haiku failed a right answer («before a call» for «before the call»), named the wrong
+  mistake («missing article before people» for «it was» → «there were») and nitpicked
+  synonyms — and its comment becomes the card's explanation. Decided with the user: AI-set
+  and card checks move to Sonnet 5 (`effort: low`, ≈ 1 ¢ per set instead of ≈ 0.5 ¢), with a
+  stricter prompt (acceptable variants are not mistakes, name the real one). Each verdict
+  also carries `topic` from the closed taxonomy, and a wrong translation's card goes to that
+  topic, not the set's: an «it was / there were» slip in an articles set trains «Структура
+  предложения». Runs graded earlier keep the set's topic. No new topics (no taxonomy change);
+  the set's own score still counts for the set's topic. Dictation translation stays on Haiku.
+
+- **2026-09-26 — Rule cards switched off.** The «Правило» card («придумайте свой пример»,
+  then compare with the examples) never said whether the learner's own example was right,
+  and it drilled the same rule as the mistake card built from the same issue. Decided with
+  the user: rule items are retired (`learner_model.is_retired`) — kept in the bank as
+  history and as AI-set seeds, never queued or listed. The mistake card now shows the rule
+  with its examples after the answer (`content.focus_examples`). Item bank schema v4.
+  Same fate for **grammar notes among phrases** — a phrase that cannot be blanked out of
+  its example and is a formula (`+`, `/`) or a takeaway only («If + Present Simple, will +
+  verb», «parallel structure in lists»): «вспомните фразу» from a paraphrased rule is not a
+  task. A plain word with no gap («windowsill») is still recalled from its meaning.
+
 - **2026-09-26 — Mistake cards rebuilt: new sentences, checked by Claude.** The old cards
   showed the verbatim quote (a scramble / typed correction, or a self-graded long fragment):
   a week later a short quote had no context left, and a long one hid which problem was meant.
@@ -42,7 +64,7 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
     natural English needs exactly the construction that went wrong. Written in the same
     analysis call (no extra call, a bit more output). A card is **«Скажите по-английски»**;
     each attempt moves to the next sentence, and the pattern rule is a hidden «Подсказка».
-  - The answer is checked by **Claude (Haiku 4.5)** — `POST /api/learner/cards/<id>/check`,
+  - The answer is checked by **Claude (Haiku 4.5; Sonnet 5 since the same day, see above)** — `POST /api/learner/cards/<id>/check`,
     usage purpose `card_grading`, a fraction of a cent. An exact match of the reference or an
     empty answer costs nothing; verdicts are cached in `data/card_verdicts.jsonl` by sentence +
     answer. The browser still logs the attempt, so «Засчитать как верный» overrules Claude;
@@ -138,7 +160,7 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
     an IT/work context; sentences of earlier sets are passed as "do not repeat". Sonnet 5,
     effort low, structured output. Not for fillers/repetitions/«Прочее».
   - Gaps and fixes are checked in the browser (with «Засчитать как верный»). Translations
-    go to Haiku 4.5 in one call when the set is handed in; an exact match of the reference
+    go to Haiku 4.5 (Sonnet 5 since 2026-09-26) in one call when the set is handed in; an exact match of the reference
     or a blank answer needs no call, and verdicts are cached per answer, so redoing a set is
     free. If grading fails (no key, network), the learner grades the translations against
     the reference and the run still counts.
@@ -280,6 +302,164 @@ Done 2026-09-20 — see «Done» above.
 ## Stage 7 — Listening dictation from YouTube
 
 Done 2026-09-20 — see «Done» above.
+
+## Stage 8 — Learning roadmap (planned and built 2026-09-26)
+
+All parts R1–R8 are done. **Still to check on the real API:** theory, lesson sets that
+follow it, spoken tasks and their rule check, module tests — quality and real prices (none
+of them has been run against Claude yet).
+
+A fixed A2 → C1 course of lessons; the model writes only a lesson's *content*, on a click.
+Decided with the user on 2026-09-26:
+
+- **The roadmap itself is fixed** (authored once, in code): levels → modules → lessons, with
+  stable ids, so progress has something to attach to. Everything the learner needs: grammar,
+  vocabulary (phrasal verbs, collocations, word formation), functional English (meetings,
+  disagreeing politely, small talk, e-mails…).
+- **Free movement.** Every lesson is open. «Продолжить» goes to the first lesson not yet
+  mastered; «Пропустить» / «Уже знаю» are marks, never locks. A lesson has a status: не начат /
+  теория / практикуется / освоен / пропущен / уже знаю. **Mastered = 2 set runs ≥ 80 % on
+  different days** (first guess, may change).
+- **Taxonomy v2, rebuilt cleanly** (the user: «делать нужно чисто и хорошо»): two levels,
+  **area** (≈ 12–15) → **topic** (≈ 60–80, what a roadmap lesson teaches). Analysis tags a
+  mistake with the fine topic; stats, priorities and «Прогресс» show both levels. No real data
+  exists yet (no recordings, attempts or sets on 2026-09-26), so no migration of old files.
+- **Theory** — a click, Claude, cached; neutral examples plus the learner's own mistakes on the
+  topic; «Сгенерировать заново» keeps the old version.
+- **Exercise sets per lesson** — the Stage 5 machinery with the lesson and its theory as
+  context; any number of sets, old ones redone for free, new ones never repeat old sentences.
+  Runs are topic attempts (with `lesson_id`), wrong answers become cards — the same learner
+  model as every other activity.
+- **Context («уклон»)** — chosen before *every* generation, everywhere something is generated
+  (lesson sets, topic sets, analysis drills, monologue / «60 секунд» prompts). Default = the
+  last one used, first IT / backend (the user is a backend developer). Starting list: IT /
+  бэкенд, созвоны и митинги, собеседование, путешествия, покупки, ресторан, жильё, здоровье,
+  small talk, хобби и спорт, новости, «Вперемешку». The learner adds own contexts in the UI
+  (saved) or types a one-off. The context is stored with the set and shown in its history.
+  Theory does **not** follow the context.
+- **Spoken task per lesson** — 1–2 min of speech using the lesson's rule, analysed by Claude
+  with that rule in focus; mistakes go to the learner model.
+- **Module entry test** — a short test to mark a whole module «уже знаю» honestly; missed
+  questions point at their lessons.
+
+Parts, in order:
+
+- [x] **R1 — Curriculum + taxonomy v2** (2026-09-26). `app/curriculum.py`: 15 areas → 76
+      topics; 4 levels (A2 20 lessons, B1 28, B2 18, C1 7) → 16 modules → 73 lessons. A lesson
+      teaches exactly one topic and its id is the topic key; only delivery (fillers,
+      restarts) and «other» have no lesson. Checked at import (unique keys, known areas and
+      levels, one lesson per topic). The analysis and grading prompts list the topics under
+      area headings (≈ 3k more input tokens, ≈ 0.6 ¢ per call); analysis schema v5,
+      progress.json v3, item bank v5. `GET /api/curriculum`; `/api/topics` and
+      `/api/learner/topics` carry the area and level, the latter also `areas` (topic
+      mastery rolled up: sums, accuracy weighted by answers). «Занятия» groups topics by
+      area, «Прогресс» shows area rows with their topics. Cambridge links kept only where
+      they were already verified; the rest wait for R4's theory.
+- [x] **R2 — Roadmap page ($0)** (2026-09-26). `#/roadmap` («Курс A2 → C1», first tile under
+      «Занятия»): levels (collapsible, the current one open) → modules → lessons with a status
+      pill, set runs / best score and the number of the learner's own speech mistakes on
+      the topic. Statuses are derived on read (`app/roadmap.py`, pure): **mastered** = 2 set
+      runs ≥ 80 % on different days, whatever the mark; a **mark** («Уже знаю» / «Пропустить»,
+      «Снять отметку») stands until the lesson is worked on again after it (a later set run
+      or theory), so «уже знаю» + a 50 % run shows «практикуется»; then practising (any set
+      run) / theory (hook for R4) / not started. Marks live in `data/roadmap_marks.jsonl`
+      (append-only, authoritative, the newest wins). «Продолжить» = the first lesson in
+      course order that is not mastered / known / skipped. Until R4 a lesson opens its topic
+      page (cards + AI sets), which links back to the course. `GET /api/roadmap`,
+      `POST /api/roadmap/lessons/<id>/mark`. 259 tests.
+- [x] **R3 — Contexts «уклон»** (2026-09-26). In code a *theme* ({key, label}; «context» already
+      names the screen of an attempt). `app/themes.py`: 12 built-in themes (IT / бэкенд first,
+      the default), each with a model-facing description and **8 hand-written speaking prompts**
+      ($0; «Вперемешку» pools them all; the 20 old prompts were spread over them). Own themes,
+      the last one used and Claude-written prompts live in `data/themes.json`
+      (`app/theme_store.py`, authoritative). Decided with the user: prompts for an **own** theme
+      are written by **Haiku on a click** («Придумать темы», ≈ 0.1 ¢, usage purpose
+      `theme_prompts`, kept; «Придумать заново» replaces them). One picker (`js/themes.js`)
+      everywhere: topic-page and «Сегодня» AI sets, «Анализировать» (the analysis `drills`;
+      hidden for Russian takes), the monologue and «60 секунд» prompts. It offers the built-in
+      themes, own ones (add / delete), and — for generations only — a one-off typed line.
+      Default = the last theme used by any generation, take or prompt picker. The theme is
+      stored with a set (`theme`, shown in its history), in `analysis.json` (`theme`), and in a
+      talk take's `drill` (prompt id, question, hint, theme — the prompt as shown). Prompt ids
+      are `<theme>:<n>` (`#/record/<id>`, `#/talk/<id>`) instead of indexes; the day's prompt
+      comes from the last-used theme, or «Вперемешку» when that theme has no prompts. API:
+      `GET/POST /api/themes`, `DELETE /api/themes/<key>`, `PUT /api/themes/last`,
+      `GET/POST /api/themes/<key>/prompts`; `theme` on set creation and `/analyze`;
+      `/api/config` lost `speaking_prompts`, `/api/speech/talks` returns `prompt`. Theory
+      (R4) will not follow the theme. 269 tests.
+- [x] **R4 — Theory** (2026-09-26, paid, kept). On a lesson's page (for now the topic page
+      `#/practice/<lesson>`, which also holds its cards and AI sets) a «Теория» card: «Написать
+      теорию · ≈ N ¢» → one Sonnet 5 call (`effort: low`, `app/theory.py`, usage purpose
+      `theory`; the price on the button is the real average once there is one, ≈ 3 ¢ until
+      then). Structured: a two-sentence summary, 2–5 sections with neutral EN examples + RU
+      translation, 3–5 typical mistakes of Russian speakers, a comment on each of the learner's
+      **own** recorded mistakes on the topic (up to 6 fix items from speech, as the request
+      shows them), and «Запомнить». Written for the lesson's level (A2…C1); the context «уклон»
+      is not used. Every version is kept in `data/theory/<lesson>.json`; «Сгенерировать заново»
+      adds one, the «Версия» select reopens older ones. The latest version's date feeds the
+      roadmap status «теория». API: `GET /api/lessons/<id>/theory[?version=n]`,
+      `POST /api/lessons/<id>/theory`. 275 tests. **Still to check:** the quality and real price
+      on the real API (not run yet).
+- [x] **R5 — Lesson exercise sets** (2026-09-26). Every set-able topic is a roadmap lesson, so
+      the topic page is the lesson page: status pill + «Урок курса · level · module», what
+      «освоен» still needs («есть 1 из 2» days at ≥ 80 %), runs and best score, and the
+      «Уже знаю» / «Пропустить» / «Снять отметку» marks (`GET /api/roadmap/lessons/<id>`);
+      then «Теория», then «Упражнения урока», then cards. A lesson's set gets the lesson's
+      **level and latest theory** in the request (summary, sections with 2 examples each,
+      «Запомнить»; «do not copy the theory's examples»), and stores `lesson_id` +
+      `theory_version` (shown as «по теории» in the history). Its runs log `lesson_id` in
+      `attempts.jsonl`. **No repeats:** the request lists up to 90 earlier sentences of the
+      topic (was 16), and after generation any exercise whose sentence an earlier set had (or
+      one repeated within the set; case/punctuation aside) is dropped
+      (`exercise_sets.drop_repeats`); a set left empty answers 502, the call still logged. The
+      set history lists every set (5 at first, «Показать все»); redo stays free. 280 tests.
+- [x] **R6 — Spoken task** of a lesson (2026-09-26). Decided by me (code-level, same pattern
+      the user chose for own-context prompts): tasks are written by **Haiku on a click**
+      («Придумать задания» / «Ещё задания», ≈ 0.1 ¢, usage purpose `lesson_tasks`), 3 per click
+      in the chosen context «уклон», each built so the answer cannot avoid the lesson's
+      construction: English `question`, Russian `hint`, and `use` («Past Perfect для того, что
+      случилось раньше: I had already…»). Kept, append-only, in `data/lesson_tasks/<lesson>.json`
+      (ids t1, t2…); the lesson page lists the chosen context's tasks. «Записать» opens
+      `#/speak/<lesson>:<task>` — the ordinary monologue recorder with the task on top; the
+      take is a normal monologue (`session.json` gains `lesson`: id + the task as shown), so
+      cards, «Сегодня»'s live step and «История» work unchanged. **Analysis** with the lesson in
+      focus (`LessonAnalysis`, the lesson's rule and task in the request) adds `lesson_check`:
+      1–10 score, Russian verdict, correct uses (verbatim) and missed places (quote → better);
+      stored as `analysis.json` `lesson`, shown as «Правило урока». Mistakes go to the learner
+      model as usual. The rule score is logged **once per take** as a topic attempt
+      (`exercise: "lesson_task"`, score (n−1)/9, `lesson_id`; a forced re-analysis adds none).
+      It makes the lesson «практикуется» and shows on the lesson page (count, best x/10), but
+      **«освоен» still counts set runs only**. 286 tests. **Still to check:** the tasks' and
+      the check's quality on the real API.
+- [x] **R7 — Module entry test** (2026-09-26). «тест модуля» next to every module on «Курс» →
+      `#/moduletest/<module>`. Claude (Sonnet 5 low, usage purpose `module_test`, ≈ 3 ¢ until
+      the log has a real average) writes on a click **one multiple-choice question (4 options,
+      wrong ones = typical Russian-speaker mistakes) and one gap per lesson**, each tagged with
+      its lesson; `app/module_test.py` keeps only well-formed ones and refuses a test that
+      misses a lesson (502, call still logged). No context «уклон» (a check of knowledge,
+      like theory). The page gets the questions **without answers**; the server grades
+      (choice = option index, gap case/punctuation-insensitive) — no model call, so a retake
+      is free. A lesson is known when both its answers are right. Results: per lesson «знаете»
+      or «К уроку», every answer with the right one and a Russian explanation, «Отметить «уже
+      знаю»: N уроков» (plain roadmap marks, only on that click, only lessons not already
+      known/mastered), «Пройти ещё раз», «Новый тест» (avoids every earlier test's sentences;
+      older tests stay selectable). Each run is kept in `data/module_tests/<module>.json` and
+      logs one `module_test` attempt per lesson (share right, `lesson_id`) — it feeds topic
+      accuracy but not the lesson's status. API: `GET/POST /api/modules/<key>/test`,
+      `POST .../test/<id>/submit`, `POST /api/modules/<key>/mark-known`. 292 tests.
+- [x] **R8 — Integration** (2026-09-26). Decided with the user: **«Урок дня» replaces the
+      AI-set step** on «Сегодня» (optional, like the set was: its actions are paid). The lesson
+      is the one the learner's own mistakes ask for most (`roadmap.recommend`: topic priority
+      from `learner_model.topic_mastery` > 0, not mastered — a «уже знаю» / «пропущен» mark
+      does not hide it, the recordings say otherwise), else the roadmap's «Продолжить». The
+      step says why («по вашим ошибкам в речи (N)» / «следующий урок курса») and the next action
+      (`roadmap.next_action`: theory → set → spoken task → sets until mastered), with its
+      price; a set is started (a waiting one, free) or written (with the context picker) right
+      there, theory / spoken task open the lesson page. Done once any lesson's set or spoken
+      task was finished today. «Курс» shows «По вашим ошибкам» (top 3, `GET /api/roadmap`
+      gains `recommended`); «Прогресс» opens with a «Курс» card (per level: mastered + known of
+      all, in work, a bar; the lessons in work with runs, passing days, spoken tasks); every
+      mistake in an analysis links to its topic / lesson page. 294 tests.
 
 ## Later
 

@@ -14,7 +14,15 @@ later switch from flat files to SQLite stays local to it. The files:
                        answers are a second source of bank items;
   data/card_verdicts.jsonl
                        append-only cache of Claude's checks of card answers,
-                       so the same answer to the same sentence is paid once.
+                       so the same answer to the same sentence is paid once;
+  data/roadmap_marks.jsonl
+                       append-only, AUTHORITATIVE - the learner's «Пропустить» /
+                       «Уже знаю» marks on roadmap lessons, the newest wins;
+  data/theory/*.json   every version of a lesson's theory (paid, not rebuildable);
+  data/lesson_tasks/*.json
+                       spoken tasks Claude wrote for a lesson (paid, append-only);
+  data/module_tests/*.json
+                       module entry tests and every run of them (paid, append-only).
 
 Spoken drills (talk, shadowing) are ordinary recordings; their results are
 derived on read from deepgram_response.json and logged as topic attempts.
@@ -35,13 +43,26 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app import config, dictation_store, learner_model, progress_store, speech_drills, utils
+from app import (
+    config,
+    curriculum,
+    dictation_store,
+    exercise_sets,
+    learner_model,
+    progress_store,
+    roadmap,
+    speech_drills,
+    theme_store,
+    utils,
+)
 
 logger = logging.getLogger(__name__)
 
 # v2: cards from mistakes made in AI exercise sets (origin "ai_set").
 # v3: fix items carry `drills` + `focus`; fixes without drills are retired.
-BANK_SCHEMA_VERSION = 3
+# v4: fix items carry `focus_examples` (the rule's examples); rule items are retired.
+# v5: topics are taxonomy v2 (app/curriculum.py).
+BANK_SCHEMA_VERSION = 5
 SET_SCHEMA_VERSION = 1
 ATTEMPT_RECORD_VERSION = 1
 USAGE_RECORD_VERSION = 1
@@ -51,6 +72,10 @@ _attempts_lock = threading.Lock()
 _usage_lock = threading.Lock()
 _sets_lock = threading.Lock()
 _verdicts_lock = threading.Lock()
+_marks_lock = threading.Lock()
+_theory_lock = threading.Lock()
+_tasks_lock = threading.Lock()
+_module_tests_lock = threading.Lock()
 
 
 def _bank_path() -> Path:
@@ -124,6 +149,7 @@ def append_attempt(
     score: Optional[float] = None,
     session_id: Optional[str] = None,
     set_id: Optional[str] = None,
+    lesson_id: Optional[str] = None,
     answer: Optional[str] = None,
     context: Optional[str] = None,
     when: Optional[dt.datetime] = None,
@@ -145,6 +171,7 @@ def append_attempt(
         "score": None if score is None else round(score, 3),
         "session_id": session_id,
         "set_id": set_id,
+        "lesson_id": lesson_id,
         "answer": answer,
         "context": context,
     }
@@ -183,7 +210,17 @@ def item_states(
 def topic_mastery(now: Optional[dt.datetime] = None) -> List[Dict[str, Any]]:
     rows = _snapshot(now or dt.datetime.now())["mastery"]
     for row in rows:
-        row["label"] = progress_store.TOPIC_TAXONOMY.get(row["key"], {}).get("label", row["key"])
+        row["label"] = curriculum.topic_label(row["key"])
+        row["area"] = curriculum.area_of(row["key"])
+        row["level"] = curriculum.level_of(row["key"])
+    return rows
+
+
+def area_mastery(topic_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The same numbers rolled up to areas, labelled for the screens."""
+    rows = learner_model.area_mastery(topic_rows)
+    for row in rows:
+        row["label"] = curriculum.AREA_BY_KEY[row["key"]].label
     return rows
 
 
@@ -194,7 +231,7 @@ def _snapshot(now: dt.datetime) -> Dict[str, Any]:
     states = item_states(bank, attempts)
     weakness = {
         row["key"]: row["weakness_score"]
-        for row in progress_store.top_weak_topics(n=len(progress_store.TOPIC_TAXONOMY), now=now)
+        for row in progress_store.top_weak_topics(n=len(curriculum.TOPICS), now=now)
     }
     mastery = learner_model.topic_mastery(weakness, bank["items"], attempts, states, now.date())
     return {"bank": bank, "attempts": attempts, "states": states, "mastery": mastery}
@@ -228,6 +265,288 @@ def card(item: Dict[str, Any], state: learner_model.ItemState, today: dt.date) -
         "state": {**state.to_dict(), "is_due": state.is_due(today)},
         "exercise": learner_model.card_exercise(item, state),
     }
+
+
+# ------------------------------------------------------------------ roadmap
+def _marks_path() -> Path:
+    return config.data_dir() / config.ROADMAP_MARKS_FILENAME
+
+
+def append_roadmap_mark(
+    lesson: str, mark: Optional[str], when: Optional[dt.datetime] = None
+) -> Dict[str, Any]:
+    """Mark a lesson «пропущен» / «уже знаю», or clear its mark (None)."""
+    if lesson not in curriculum.MODULE_OF_LESSON:
+        raise ValueError(f"Unknown lesson {lesson!r}.")
+    if mark is not None and mark not in roadmap.MARKS:
+        raise ValueError(f"Unknown mark {mark!r}.")
+    record = {
+        "ts": (when or dt.datetime.now()).isoformat(timespec="seconds"),
+        "lesson": lesson,
+        "mark": mark,
+    }
+    with _marks_lock:
+        utils.append_jsonl(_marks_path(), record)
+    return record
+
+
+def load_roadmap_marks() -> List[Dict[str, Any]]:
+    return [
+        record
+        for record in utils.read_jsonl(_marks_path())
+        if isinstance(record.get("ts"), str) and isinstance(record.get("lesson"), str)
+    ]
+
+
+def roadmap_view(priority: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """The course with every lesson's status, for GET /api/roadmap, plus the
+    lessons recommended by the learner's own mistakes (`priority`: topic ->
+    learner_model priority; computed here when not given)."""
+    speech = {
+        row["key"]: row["count"]
+        for row in progress_store.top_weak_topics(n=len(curriculum.TOPICS))
+    }
+    view = roadmap.course(
+        load_attempts(), load_roadmap_marks(), theory_dates=theory_dates(), speech_mistakes=speech
+    )
+    if priority is None:
+        priority = {row["key"]: row["priority"] for row in topic_mastery()}
+    view["recommended"] = roadmap.recommend(view, priority)
+    return view
+
+
+def roadmap_lesson(lesson: str) -> Optional[Dict[str, Any]]:
+    """One lesson's roadmap row, with its level and module - the lesson page."""
+    view = roadmap_view()
+    for level in view["levels"]:
+        for module in level["modules"]:
+            for row in module["lessons"]:
+                if row["id"] == lesson:
+                    return {
+                        **row,
+                        "level": {"key": level["key"], "label": level["label"]},
+                        "module": {"key": module["key"], "title": module["title"]},
+                        "mastery_runs": view["mastery_runs"],
+                        "pass_score": view["pass_score"],
+                    }
+    return None
+
+
+# ------------------------------------------------------------------- theory
+# data/theory/<lesson>.json: {"lesson", "versions": [{"created_at", "model",
+# "effort", "request_id", "usage", "own_mistakes", "content"}]}, oldest first.
+# Paid for and not rebuildable: a new version is appended, never replacing one.
+def _theory_path(lesson: str) -> Path:
+    return config.theory_dir() / f"{lesson}.json"
+
+
+def load_theory(lesson: str) -> Optional[Dict[str, Any]]:
+    """A lesson's theory file (the caller checks the lesson id), or None."""
+    path = _theory_path(lesson)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Could not read theory %s", path)
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("versions"), list):
+        return None
+    return data
+
+
+def add_theory_version(lesson: str, version: Dict[str, Any]) -> Dict[str, Any]:
+    with _theory_lock:
+        data = load_theory(lesson) or {"lesson": lesson, "versions": []}
+        data["versions"].append(version)
+        config.theory_dir().mkdir(parents=True, exist_ok=True)
+        utils.write_json(_theory_path(lesson), data)
+    return data
+
+
+def theory_dates() -> Dict[str, str]:
+    """Lesson -> when its latest theory was written (the roadmap's «теория»)."""
+    directory = config.theory_dir()
+    if not directory.is_dir():
+        return {}
+    dates = {}
+    for path in directory.glob("*.json"):
+        data = load_theory(path.stem)
+        versions = (data or {}).get("versions") or []
+        if path.stem in curriculum.MODULE_OF_LESSON and versions:
+            dates[path.stem] = versions[-1].get("created_at")
+    return {lesson: when for lesson, when in dates.items() if isinstance(when, str)}
+
+
+def theory_own_mistakes(topic: str) -> List[Dict[str, Any]]:
+    """The learner's own recorded mistakes on a topic, newest first - the
+    same English speech items a set is seeded with, fixes only."""
+    return [
+        item for item in set_seeds(topic) if item.get("kind") == learner_model.KIND_FIX
+    ][: config.THEORY_OWN_MISTAKES]
+
+
+def theory_cost_estimate() -> float:
+    entry = usage_summary(recent=0)["by_purpose"].get("anthropic:theory", {})
+    return entry.get("avg_cost_usd") or config.THEORY_COST_ESTIMATE_USD
+
+
+# -------------------------------------------------------- lesson spoken task
+# data/lesson_tasks/<lesson>.json: {"lesson", "tasks": [{"id": "t1", "theme",
+# "question", "hint", "use", "created_at", "model", "cost_usd"}]}. Written by
+# Claude a few at a time per context; paid for, so only ever appended to.
+def _tasks_path(lesson: str) -> Path:
+    return config.lesson_tasks_dir() / f"{lesson}.json"
+
+
+def load_lesson_tasks(lesson: str) -> List[Dict[str, Any]]:
+    path = _tasks_path(lesson)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Could not read lesson tasks %s", path)
+        return []
+    tasks = data.get("tasks") if isinstance(data, dict) else None
+    return [t for t in tasks or [] if isinstance(t, dict) and t.get("id") and t.get("question")]
+
+
+def add_lesson_tasks(
+    lesson: str,
+    theme: Dict[str, Optional[str]],
+    tasks: List[Dict[str, str]],
+    *,
+    model: str,
+    cost_usd: Optional[float],
+) -> List[Dict[str, Any]]:
+    """Append freshly written tasks (ids t1, t2, ... across the lesson)."""
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    with _tasks_lock:
+        existing = load_lesson_tasks(lesson)
+        added = [
+            {
+                "id": f"t{len(existing) + number}",
+                "theme": theme,
+                "question": task["question"],
+                "hint": task["hint"],
+                "use": task.get("use", ""),
+                "created_at": now,
+                "model": model,
+                "cost_usd": cost_usd,
+            }
+            for number, task in enumerate(tasks, start=1)
+        ]
+        config.lesson_tasks_dir().mkdir(parents=True, exist_ok=True)
+        utils.write_json(_tasks_path(lesson), {"lesson": lesson, "tasks": existing + added})
+    return added
+
+
+def lesson_task(lesson: str, task_id: str) -> Optional[Dict[str, Any]]:
+    return next((t for t in load_lesson_tasks(lesson) if t["id"] == task_id), None)
+
+
+# --------------------------------------------------------- module entry test
+# data/module_tests/<module>.json: {"module", "tests": [{"id": "test-1",
+# "created_at", "questions", "generation", "runs": [{"at", "answers",
+# "results", "by_lesson", "score"}]}]}. Paid for, so only ever appended to.
+def _module_tests_path(module: str) -> Path:
+    return config.module_tests_dir() / f"{module}.json"
+
+
+def load_module_tests(module: str) -> List[Dict[str, Any]]:
+    path = _module_tests_path(module)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Could not read module tests %s", path)
+        return []
+    tests = data.get("tests") if isinstance(data, dict) else None
+    return [t for t in tests or [] if isinstance(t, dict) and t.get("id") and t.get("questions")]
+
+
+def _save_module_tests(module: str, tests: List[Dict[str, Any]]) -> None:
+    config.module_tests_dir().mkdir(parents=True, exist_ok=True)
+    utils.write_json(_module_tests_path(module), {"module": module, "tests": tests})
+
+
+def add_module_test(
+    module: str, questions: List[Dict[str, Any]], generation: Dict[str, Any]
+) -> Dict[str, Any]:
+    with _module_tests_lock:
+        tests = load_module_tests(module)
+        test = {
+            "id": f"test-{len(tests) + 1}",
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "questions": questions,
+            "generation": generation,
+            "runs": [],
+        }
+        _save_module_tests(module, tests + [test])
+    return test
+
+
+def record_module_test_run(
+    module: str,
+    test_id: str,
+    answers: Dict[str, str],
+    graded: Dict[str, Any],
+    now: Optional[dt.datetime] = None,
+) -> Dict[str, Any]:
+    """Store a run in the test file and log one topic attempt per lesson:
+    the test is evidence of what the learner knows, like any drill."""
+    now = now or dt.datetime.now()
+    run = {"at": now.isoformat(timespec="seconds"), "answers": answers, **graded}
+    with _module_tests_lock:
+        tests = load_module_tests(module)
+        test = next((t for t in tests if t["id"] == test_id), None)
+        if test is None:
+            raise KeyError(test_id)
+        test.setdefault("runs", []).append(run)
+        _save_module_tests(module, tests)
+    for lesson, entry in graded["by_lesson"].items():
+        append_attempt(
+            None,
+            config.MODULE_TEST_EXERCISE,
+            entry["known"],
+            topic=lesson,
+            score=entry["score"],
+            lesson_id=lesson,
+            when=now,
+        )
+    return run
+
+
+def module_test_cost_estimate() -> float:
+    entry = usage_summary(recent=0)["by_purpose"].get("anthropic:module_test", {})
+    return entry.get("avg_cost_usd") or config.MODULE_TEST_COST_ESTIMATE_USD
+
+
+def record_lesson_task(session: utils.Session, check: Optional[Dict[str, Any]]) -> None:
+    """Log a lesson's spoken task once, as a topic attempt scored by how well
+    the lesson's rule was used. A forced re-analysis never logs it again: the
+    attempts log is append-only, and one take is one attempt."""
+    lesson = (session.lesson or {}).get("id")
+    if not lesson or not check:
+        return
+    exercise = config.LESSON_TASK_EXERCISE
+    if any(
+        a.get("session_id") == session.id and a.get("exercise") == exercise
+        for a in load_attempts()
+    ):
+        return
+    score = (check["score"] - 1) / 9  # 1..10 -> 0..1
+    append_attempt(
+        None,
+        exercise,
+        score >= config.DRILL_PASS_SCORE,
+        topic=lesson,
+        score=score,
+        session_id=session.id,
+        lesson_id=lesson,
+    )
 
 
 # ------------------------------------------------------------ card verdicts
@@ -332,6 +651,11 @@ def set_summary(exercise_set: Dict[str, Any]) -> Dict[str, Any]:
         "topic": exercise_set.get("topic"),
         "created_at": exercise_set.get("created_at"),
         "intro": exercise_set.get("intro", ""),
+        # The context («уклон») it was written in; sets before R3 have none.
+        "theme": exercise_set.get("theme"),
+        # A roadmap lesson's set (R5) and the theory version it followed.
+        "lesson_id": exercise_set.get("lesson_id"),
+        "theory_version": exercise_set.get("theory_version"),
         "exercises": len(exercise_set.get("exercises") or []),
         "runs": len(runs),
         "last_score": scores[-1] if scores else None,
@@ -376,18 +700,18 @@ def set_seeds(topic: str, bank: Optional[Dict[str, Any]] = None) -> List[Dict[st
     return items[: config.SET_SEED_ITEMS]
 
 
+def set_sentences(topic: str) -> List[str]:
+    """Every exercise sentence of every set on a topic, newest set first."""
+    return [
+        exercise_sets.exercise_text(exercise)
+        for exercise_set in list_sets(topic)
+        for exercise in exercise_set.get("exercises") or []
+    ]
+
+
 def set_avoid_sentences(topic: str) -> List[str]:
     """Sentences of the latest sets on a topic, so a new set does not repeat them."""
-    sentences: List[str] = []
-    for exercise_set in list_sets(topic):
-        for exercise in exercise_set.get("exercises") or []:
-            text = exercise.get("russian") or exercise.get("sentence")
-            if not text:
-                text = f"{exercise.get('before', '')}___{exercise.get('after', '')}"
-            sentences.append(text.strip())
-            if len(sentences) >= config.SET_AVOID_SENTENCES:
-                return sentences
-    return sentences
+    return set_sentences(topic)[: config.SET_AVOID_SENTENCES]
 
 
 def cached_verdict(
@@ -433,7 +757,9 @@ def record_set_run(
             if result.get("graded_by") == "claude":
                 key = learner_model.normalize_answer(result.get("answer", ""))
                 verdicts.setdefault(result["exercise_id"], {})[key] = {
-                    field: result.get(field) for field in ("correct", "comment", "corrected")
+                    field: result.get(field)
+                    for field in ("correct", "comment", "corrected", "topic")
+                    if field in result
                 }
         utils.write_json(_set_path(set_id), exercise_set)
 
@@ -445,6 +771,7 @@ def record_set_run(
         topic=exercise_set.get("topic"),
         score=score,
         set_id=set_id,
+        lesson_id=exercise_set.get("lesson_id"),
         context=context,
         when=now,
     )
@@ -480,59 +807,73 @@ def set_cost_estimate() -> float:
 
 
 def topic_info(key: str) -> Dict[str, Any]:
-    """A topic as the screens show it: label, description, theory links."""
-    info = progress_store.TOPIC_TAXONOMY.get(key, {})
-    return {
-        "key": key,
-        "label": info.get("label", key),
-        "description": info.get("description", ""),
-        "resources": [
-            {"title": title, "url": url} for title, url in config.TOPIC_RESOURCES.get(key, ())
-        ],
-    }
+    """A topic as the screens show it: label, area, level, description, links."""
+    return curriculum.topic_info(key)
 
 
-def _set_step(
+_LESSON_WORK = (learner_model.SET_EXERCISE, config.LESSON_TASK_EXERCISE)
+
+
+def _lesson_step(
     mastery: List[Dict[str, Any]], attempts_today: List[Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
-    """The optional «Сегодня» step: an AI set on the topic that needs it most.
+    """The optional «Сегодня» step «Урок дня» (R8; it replaced the AI-set step,
+    decided with the user 2026-09-26): the lesson the learner's own mistakes
+    ask for most, else the roadmap's «Продолжить», with its next action -
+    theory, a set, or the spoken task.
 
-    Optional because it costs money: it never counts towards "all done" or
-    the minutes left, and nothing is generated until the learner clicks.
+    Optional because its actions cost money: it never counts towards "all
+    done" or the minutes left. Done once a set or a spoken task of any
+    lesson was finished today.
     """
-    done = [a for a in attempts_today if a.get("exercise") == learner_model.SET_EXERCISE]
+    done = [a for a in attempts_today if a.get("exercise") in _LESSON_WORK and a.get("topic")]
     if done:
         last = done[-1]
         return {
-            "kind": "ai_set",
+            "kind": "lesson",
             "optional": True,
             "status": "done",
-            "topic": topic_info(last["topic"]),
+            "lesson": _step_lesson(last["topic"]),
+            "exercise": last["exercise"],
             "score": learner_model.attempt_score(last),
             "minutes": 0,
         }
-    topic = next(
-        (
-            row["key"]
-            for row in mastery
-            if row["priority"] > 0 and learner_model.set_topic_allowed(row["key"])
-        ),
-        None,
+    priority = {row["key"]: row["priority"] for row in mastery}
+    view = roadmap_view(priority)
+    recommended = view["recommended"][:1]
+    lesson = recommended[0]["id"] if recommended else view["continue"]
+    if lesson is None:
+        return None
+    row = next(
+        r for level in view["levels"] for m in level["modules"] for r in m["lessons"]
+        if r["id"] == lesson
     )
-    if topic is None:
-        return None
-    waiting = unstarted_set(topic)
-    if waiting is None and config.get_anthropic_api_key() is None:
-        return None
+    action = roadmap.next_action(row, lesson in theory_dates())
+    waiting = unstarted_set(lesson) if action == roadmap.ACTION_SET else None
+    cost = {
+        roadmap.ACTION_THEORY: theory_cost_estimate(),
+        roadmap.ACTION_SET: 0.0 if waiting else set_cost_estimate(),
+        roadmap.ACTION_SPOKEN: 0.0,
+    }[action]
     return {
-        "kind": "ai_set",
+        "kind": "lesson",
         "optional": True,
         "status": "todo",
-        "topic": topic_info(topic),
+        "lesson": _step_lesson(lesson),
+        "reason": "mistakes" if recommended else "course",
+        "speech_mistakes": row["speech_mistakes"],
+        "action": action,
         "set_id": waiting["id"] if waiting else None,
-        "cost_usd": 0.0 if waiting else set_cost_estimate(),
+        "cost_usd": cost,
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
         "minutes": round(config.WORKOUT_MINUTES_SET),
     }
+
+
+def _step_lesson(lesson: str) -> Dict[str, Any]:
+    info = topic_info(lesson)
+    level = curriculum.LEVEL_BY_KEY.get(info["level"] or "")
+    return {**info, "level_label": level.label if level else ""}
 
 
 # ------------------------------------------------------------ spoken drills
@@ -655,7 +996,10 @@ def talk_series() -> List[Dict[str, Any]]:
             {
                 "series": key,
                 "started_at": take.started_at.isoformat(timespec="seconds"),
-                "prompt_index": drill.get("prompt_index"),
+                # The prompt as it was shown (own themes' prompts can be deleted).
+                "prompt": {
+                    key: drill.get(key) for key in ("prompt_id", "question", "hint", "theme")
+                },
                 "language": take.language_key,
                 "rounds": [],
             },
@@ -700,13 +1044,12 @@ def _speech_step(today: dt.date, sessions: List[utils.Session]) -> Optional[Dict
         }
     if config.get_api_key() is None:
         return None
-    index = speech_drills.talk_prompt_index(today)
-    question, hint = config.SPEAKING_PROMPTS[index]
     return {
         "kind": "speech",
         "optional": True,
         "status": "todo",
-        "prompt": {"index": index, "question": question, "hint": hint},
+        # Half a list away from the monologue's, so the two never coincide.
+        "prompt": theme_store.prompt_of_day(today, offset=1),
         "passage": speech_drills.pick_passage(shadowing_passages()),
         "minutes": round(config.WORKOUT_MINUTES_SPEECH),
     }
@@ -786,27 +1129,25 @@ def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
     analysed = [s for s in recorded_today if s.analysis_path.is_file()]
     live = analysed[0] if analysed else recorded_today[0] if recorded_today else None
     live_status = "done" if analysed else "analyze" if recorded_today else "todo"
-    prompt_index = learner_model.speaking_prompt_index(today)
-    question, hint = config.SPEAKING_PROMPTS[prompt_index]
     live_step = {
         "kind": "monologue",
         "status": live_status,
         "session_id": live.id if live else None,
         "activity": live.kind if live else config.KIND_MONOLOGUE,
-        "prompt": {"index": prompt_index, "question": question, "hint": hint},
+        "prompt": theme_store.prompt_of_day(today),
         "minutes": 0 if live_status == "done" else round(config.WORKOUT_MINUTES_MONOLOGUE),
     }
 
     # 3. Listening dictation: a few sentences of a YouTube lesson ($0).
     dictation_step = _dictation_step(now)
-    # 4. Optional and paid: an AI exercise set on the main topic.
-    set_step = _set_step(snap["mastery"], attempts_today)
+    # 4. Optional (its actions are paid): «Урок дня» of the roadmap.
+    lesson_step = _lesson_step(snap["mastery"], attempts_today)
     # 5. Optional, Deepgram only: a spoken warm-up.
     speech_step = _speech_step(today, sessions)
 
     focus = next((row for row in snap["mastery"] if row["priority"] > 0), None)
     steps = [cards_step, live_step, dictation_step]
-    steps += [set_step] if set_step else []
+    steps += [lesson_step] if lesson_step else []
     steps += [speech_step] if speech_step else []
 
     active_days = {dt.datetime.fromisoformat(a["ts"]).date() for a in snap["attempts"]}
@@ -847,9 +1188,7 @@ def activity_history(days: int = config.ACTIVITY_HISTORY_DAYS) -> List[Dict[str,
         entry["dictation"] = counts
     for entry in history:
         for drill in entry["drills"]:
-            drill["label"] = (
-                progress_store.TOPIC_TAXONOMY.get(drill["topic"], {}).get("label", drill["topic"])
-            )
+            drill["label"] = curriculum.topic_label(drill["topic"])
     history.sort(key=lambda entry: entry["date"], reverse=True)
     return history[:days]
 

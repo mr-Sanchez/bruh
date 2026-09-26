@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import config, progress_store  # noqa: E402
+from app import config, curriculum, progress_store  # noqa: E402
 
 
 def write_analysed_session(
@@ -52,26 +52,26 @@ class ProgressStoreTests(unittest.TestCase):
         first = dt.datetime(2026, 9, 1, 10, 0, 0)
         second = dt.datetime(2026, 9, 3, 10, 0, 0)
         write_analysed_session(
-            self.root, "s1", first, {"topic_counts": {"verb_tense": 2, "articles": 1}}
+            self.root, "s1", first, {"topic_counts": {"present_perfect": 2, "articles_basic": 1}}
         )
-        write_analysed_session(self.root, "s2", second, {"topic_counts": {"verb_tense": 1}})
+        write_analysed_session(self.root, "s2", second, {"topic_counts": {"present_perfect": 1}})
 
         data = progress_store.rebuild_from_sessions()
 
-        self.assertEqual(data["topics"]["verb_tense"]["count"], 3)
-        self.assertEqual(data["topics"]["verb_tense"]["last_seen"], second.isoformat())
-        self.assertEqual(data["topics"]["verb_tense"]["first_seen"], first.isoformat())
-        self.assertEqual(data["topics"]["articles"]["count"], 1)
-        self.assertEqual(data["topics"]["verb_tense"]["session_ids"], ["s1", "s2"])
+        self.assertEqual(data["topics"]["present_perfect"]["count"], 3)
+        self.assertEqual(data["topics"]["present_perfect"]["last_seen"], second.isoformat())
+        self.assertEqual(data["topics"]["present_perfect"]["first_seen"], first.isoformat())
+        self.assertEqual(data["topics"]["articles_basic"]["count"], 1)
+        self.assertEqual(data["topics"]["present_perfect"]["session_ids"], ["s1", "s2"])
 
     def test_rebuild_replaces_rather_than_adds_on_reanalysis(self) -> None:
         when = dt.datetime(2026, 9, 1, 10, 0, 0)
-        write_analysed_session(self.root, "s1", when, {"topic_counts": {"verb_tense": 1}})
+        write_analysed_session(self.root, "s1", when, {"topic_counts": {"present_perfect": 1}})
         progress_store.rebuild_from_sessions()
-        write_analysed_session(self.root, "s1", when, {"topic_counts": {"verb_tense": 2}})
+        write_analysed_session(self.root, "s1", when, {"topic_counts": {"present_perfect": 2}})
         data = progress_store.rebuild_from_sessions()
-        self.assertEqual(data["topics"]["verb_tense"]["count"], 2)
-        self.assertEqual(data["topics"]["verb_tense"]["session_ids"], ["s1"])
+        self.assertEqual(data["topics"]["present_perfect"]["count"], 2)
+        self.assertEqual(data["topics"]["present_perfect"]["session_ids"], ["s1"])
 
     def test_weakness_score_decays_with_recency(self) -> None:
         now = dt.datetime(2026, 9, 15, 0, 0, 0)
@@ -84,24 +84,24 @@ class ProgressStoreTests(unittest.TestCase):
     def test_top_weak_topics_sorted_by_score(self) -> None:
         now = dt.datetime(2026, 9, 15, 0, 0, 0)
         write_analysed_session(
-            self.root, "s1", now - dt.timedelta(days=30), {"topic_counts": {"articles": 1}}
+            self.root, "s1", now - dt.timedelta(days=30), {"topic_counts": {"articles_basic": 1}}
         )
-        write_analysed_session(self.root, "s2", now, {"topic_counts": {"verb_tense": 5}})
+        write_analysed_session(self.root, "s2", now, {"topic_counts": {"present_perfect": 5}})
         progress_store.rebuild_from_sessions()
         ranked = progress_store.top_weak_topics(n=10, now=now)
-        self.assertEqual(ranked[0]["key"], "verb_tense")
-        self.assertEqual(ranked[0]["label"], progress_store.TOPIC_TAXONOMY["verb_tense"]["label"])
+        self.assertEqual(ranked[0]["key"], "present_perfect")
+        self.assertEqual(ranked[0]["label"], curriculum.topic_label("present_perfect"))
 
     def test_rebuild_falls_back_to_analysis_date_without_session_json(self) -> None:
         analysis = {
             "created_at": "2026-09-01T10:00:00",
-            "topic_counts": {"word_order": 2, "prepositions": 1},
+            "topic_counts": {"word_order": 2, "prepositions_time_place": 1},
         }
         write_analysed_session(self.root, "2026-09-01_10-00-00", None, analysis)
 
         data = progress_store.rebuild_from_sessions(self.root)
         self.assertEqual(data["topics"]["word_order"]["count"], 2)
-        self.assertEqual(data["topics"]["prepositions"]["count"], 1)
+        self.assertEqual(data["topics"]["prepositions_time_place"]["count"], 1)
         self.assertEqual(data["topics"]["word_order"]["last_seen"], "2026-09-01T10:00:00")
 
     def test_score_history_keeps_v2_scores_in_recording_order(self) -> None:
@@ -118,7 +118,7 @@ class ProgressStoreTests(unittest.TestCase):
             {"schema_version": 2, "scores": scores, "overall_score": 6.0, "language": "en-US"},
         )
         write_analysed_session(
-            self.root, "v1", dt.datetime(2026, 9, 1, 9, 0), {"topic_counts": {"articles": 1}}
+            self.root, "v1", dt.datetime(2026, 9, 1, 9, 0), {"topic_counts": {"articles_basic": 1}}
         )
         write_analysed_session(
             self.root,
@@ -137,16 +137,16 @@ class ProgressStoreTests(unittest.TestCase):
 
     def test_load_progress_rebuilds_an_old_schema_file(self) -> None:
         write_analysed_session(
-            self.root, "s1", dt.datetime(2026, 9, 1), {"topic_counts": {"articles": 1}}
+            self.root, "s1", dt.datetime(2026, 9, 1), {"topic_counts": {"articles_basic": 1}}
         )
         config.data_dir().mkdir(parents=True)
-        old = {"schema_version": 1, "topics": {"verb_tense": {"count": 99}}}
+        old = {"schema_version": 1, "topics": {"present_perfect": {"count": 99}}}
         (config.data_dir() / config.PROGRESS_FILENAME).write_text(json.dumps(old), "utf-8")
 
         data = progress_store.load_progress()
 
         self.assertEqual(data["schema_version"], progress_store.SCHEMA_VERSION)
-        self.assertEqual(set(data["topics"]), {"articles"})
+        self.assertEqual(set(data["topics"]), {"articles_basic"})
         self.assertEqual(data["score_history"], [])
 
 

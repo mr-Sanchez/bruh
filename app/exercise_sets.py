@@ -2,8 +2,9 @@
 
 The free drills can only reuse sentences the learner already
 spoke. A set adds *new* sentences on the same weak spot: 8-10 exercises on one
-topic, built around the learner's own mistakes and rules on it, in an IT /
-work context. Three kinds, easy to hard:
+topic, built around the learner's own mistakes and rules on it, in the
+context («уклон», app.themes) the learner picked for this set. Three kinds,
+easy to hard:
 
   * gap        - one blank in an English sentence; checked in the browser;
   * fix        - an English sentence with one mistake to correct; checked in
@@ -29,8 +30,15 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
-from app import config
-from app.analyzer import AnalysisError, MissingAnthropicApiKeyError, friendly_api_error, usage_counts
+from app import config, themes
+from app.analyzer import (
+    AnalysisError,
+    MissingAnthropicApiKeyError,
+    TopicKey,
+    friendly_api_error,
+    usage_counts,
+)
+from app.curriculum import taxonomy_prompt_lines
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +84,53 @@ class Verdict(BaseModel):
     correct: bool
     comment: str
     corrected: str
+    # The main mistake's own topic: a set on articles can still catch an
+    # "it was" for "there were", and the card should train where it belongs.
+    topic: TopicKey
 
 
 class Grading(BaseModel):
     verdicts: List[Verdict] = Field(default_factory=list)
+
+
+class SpeakingPrompt(BaseModel):
+    question: str
+    hint: str
+
+
+class SpeakingPrompts(BaseModel):
+    prompts: List[SpeakingPrompt] = Field(default_factory=list)
+
+
+class TestChoice(BaseModel):
+    lesson: str
+    question: str
+    options: List[str]
+    correct: int
+    explanation: str
+
+
+class TestGap(BaseModel):
+    lesson: str
+    sentence: str
+    answers: List[str]
+    hint: str = ""
+    explanation: str
+
+
+class ModuleTest(BaseModel):
+    choices: List[TestChoice] = Field(default_factory=list)
+    gaps: List[TestGap] = Field(default_factory=list)
+
+
+class LessonTask(BaseModel):
+    question: str
+    hint: str
+    use: str
+
+
+class LessonTasks(BaseModel):
+    tasks: List[LessonTask] = Field(default_factory=list)
 
 
 # ------------------------------------------------------------------ results
@@ -100,8 +151,21 @@ class GenerationResult:
 
 @dataclass
 class GradingResult:
-    # By exercise id: {"correct", "comment", "corrected"}.
+    # By exercise id: {"correct", "comment", "corrected", "topic"}.
     verdicts: Dict[str, Dict[str, Any]]
+    call: ClaudeCall
+
+
+@dataclass
+class ModuleTestResult:
+    test: Dict[str, Any]  # ModuleTest as a dict: {"choices", "gaps"}
+    call: ClaudeCall
+
+
+@dataclass
+class PromptsResult:
+    # [{"question", "hint"}]: English question, Russian hint.
+    prompts: List[Dict[str, str]]
     call: ClaudeCall
 
 
@@ -139,10 +203,9 @@ English translation. `focus`: a short Russian cue naming the construction to \
 use (for example "Present Perfect: have done").
 
 Rules:
-- Context: IT and everyday work life (projects, meetings, code review, \
-deployments, colleagues, learning), with some everyday life. Vary people, \
-situations and sentence shapes; never reuse the learner's own sentences \
-word for word.
+- Context: every sentence is set in the situations named on the request's \
+"Context:" line. Vary people, situations and sentence shapes within it; never \
+reuse the learner's own sentences word for word.
 - Level: just above the learner's own sentences - clear and natural, not \
 literary. 6-16 words per sentence.
 - Every exercise must have one clear correct answer; avoid sentences where \
@@ -156,15 +219,82 @@ construction it trains, a reference translation and the learner's answer.
 
 - `correct`: true when the answer is correct, natural enough English that \
 says the same thing, AND uses the target construction correctly. Other \
-wording than the reference is fine. A small typo that is clearly not a \
+wording than the reference is fine: a synonym, a different but acceptable \
+article, tense or word order is NOT a mistake - judge only what a native \
+speaker would actually call wrong. A small typo that is clearly not a \
 grammar mistake does not make it wrong. An empty or off-meaning answer is \
 wrong.
-- `comment`: one or two Russian sentences: what is wrong and why, or a brief \
-confirmation when it is right.
+- `comment`: one or two Russian sentences naming the real mistake precisely \
+(the learner's exact words -> the right ones) and why; never invent a \
+mistake the answer does not have, never contradict yourself, no nitpicks on \
+acceptable choices. A brief confirmation when it is right.
 - `corrected`: the learner's own answer with the minimal fixes that make it \
 correct (unchanged when it is already correct; the reference when the answer \
 is empty or unusable).
+- `topic`: the key of the main mistake's topic, from this closed list (use \
+exactly these keys) - which may differ from the set's topic:
+{taxonomy}
+  For a correct answer, or an empty one, use the set's topic key.
 - Return one verdict per item, with its `number`."""
+
+
+SPEAKING_PROMPTS_PROMPT = """You write speaking prompts for an adult \
+Russian-speaking learner of English (B1-B2) who practises talking for 1-3 \
+minutes on a question. The learner chose the context the questions must come \
+from; it is given in their own words.
+
+Write exactly {count} prompts, all clearly within that context and different \
+from each other: a mix of telling about their own experience, explaining or \
+describing something, a role-play situation ("You are ... Explain / ask / \
+complain ..."), and giving an opinion with reasons.
+- `question`: one or two plain English sentences, easy to understand, that \
+invite a longer answer (not a yes/no question).
+- `hint`: a short Russian label of the prompt, 2-6 words (for example \
+"Недавний проект и ваша роль")."""
+
+
+MODULE_TEST_PROMPT = """You write a short placement test for one module of \
+an English course, for an adult Russian speaker. The test decides which of \
+the module's lessons the learner already knows, so every question checks \
+exactly ONE lesson's topic - the one it is tagged with - and a learner who \
+does not know that topic should get it wrong.
+
+For EVERY lesson you are given, write exactly one `choices` item and exactly \
+one `gaps` item, with `lesson` set to that lesson's key:
+- `choices`: `question` - an English sentence with "___" where the tested \
+form goes (or a short question about usage); `options` - 4 short options, \
+exactly one correct, the wrong ones being the mistakes Russian speakers \
+really make; `correct` - the 0-based index of the right option.
+- `gaps`: `sentence` - an English sentence with exactly one "___"; \
+`answers` - every correct filler (the main one first, contractions too); \
+`hint` - an optional cue such as the base verb "(go)"; empty when the blank \
+should be guessed.
+- `explanation` (both): one Russian sentence on why the answer is right.
+
+Rules: neutral everyday and work sentences, 6-14 words, at the lesson's \
+level; exactly one correct answer; do not reuse the sentences listed as used \
+before."""
+
+
+LESSON_TASKS_PROMPT = """You write speaking tasks for one lesson of an \
+English course. The learner is an adult Russian speaker; a task is 1-2 \
+minutes of talking, and it must make the learner USE the lesson's \
+construction many times, naturally - the task is built so that a good answer \
+cannot avoid it (for Past Perfect: explain what had already happened before \
+something else; for polite requests: ask several people for things).
+
+Write exactly {count} different tasks, all in the given context and at the \
+given level.
+- `question`: 1-3 plain English sentences - the situation and what to talk \
+about (a role-play or their own experience).
+- `hint`: a short Russian label, 2-6 words.
+- `use`: one Russian sentence naming what to use, with a tiny English \
+example (for example "Past Perfect для того, что случилось раньше: \
+I had already left when...")."""
+
+
+def _grading_prompt() -> str:
+    return GRADING_PROMPT.format(taxonomy=taxonomy_prompt_lines(indent="  "))
 
 
 def _default_client_factory(api_key: str) -> Any:
@@ -197,17 +327,23 @@ class ExerciseSetGenerator:
         topic: Dict[str, str],
         seeds: Sequence[Dict[str, Any]],
         avoid: Sequence[str] = (),
+        theme: Optional[Dict[str, Optional[str]]] = None,
+        lesson: Optional[Dict[str, Any]] = None,
     ) -> GenerationResult:
         """A new set on `topic` ({"key", "label", "description"}).
 
         `seeds` are the learner's own bank items on the topic (fix / pattern),
-        `avoid` sentences from earlier sets on it.
+        `avoid` sentences from earlier sets on it, `theme` the context the
+        sentences are set in (None: the default, IT / backend), `lesson`
+        the roadmap lesson it is for - {"level", "theory"} (theory: the
+        content of its latest version, or None) - so a lesson's set trains
+        exactly what its theory taught, at its level.
         """
         self._require_key()
         system = GENERATION_PROMPT.format(
             gaps=config.SET_GAPS, fixes=config.SET_FIXES, translations=config.SET_TRANSLATIONS
         )
-        user = _generation_request(topic, seeds, avoid)
+        user = _generation_request(topic, seeds, avoid, theme, lesson)
         logger.info("Exercise set requested: topic=%s, seeds=%d", topic["key"], len(seeds))
         response = self._call(
             model=config.EXERCISE_SET_MODEL,
@@ -243,9 +379,11 @@ class ExerciseSetGenerator:
         response = self._call(
             model=config.GRADING_MODEL,
             max_tokens=config.GRADING_MAX_TOKENS,
-            system=GRADING_PROMPT,
+            system=_grading_prompt(),
             messages=[{"role": "user", "content": "\n".join(lines)}],
             output_format=Grading,
+            output_config={"effort": config.GRADING_EFFORT},
+            thinking={"type": "adaptive"},
         )
         verdicts: Dict[str, Dict[str, Any]] = {}
         for verdict in response.parsed_output.verdicts:
@@ -254,8 +392,101 @@ class ExerciseSetGenerator:
                     "correct": verdict.correct,
                     "comment": verdict.comment.strip(),
                     "corrected": verdict.corrected.strip(),
+                    "topic": verdict.topic,
                 }
-        return GradingResult(verdicts=verdicts, call=_call_info(response, config.GRADING_MODEL))
+        return GradingResult(
+            verdicts=verdicts,
+            call=_call_info(response, config.GRADING_MODEL, config.GRADING_EFFORT),
+        )
+
+    def write_speaking_prompts(self, theme_label: str) -> PromptsResult:
+        """Monologue / «60 секунд» prompts for the learner's own context
+        (built-in contexts have hand-written ones in app.themes)."""
+        self._require_key()
+        response = self._call(
+            model=config.THEME_PROMPTS_MODEL,
+            max_tokens=config.THEME_PROMPTS_MAX_TOKENS,
+            system=SPEAKING_PROMPTS_PROMPT.format(count=config.THEME_PROMPTS_COUNT),
+            messages=[{"role": "user", "content": f"Context: {theme_label}"}],
+            output_format=SpeakingPrompts,
+        )
+        prompts = [
+            {"question": p.question.strip(), "hint": p.hint.strip()}
+            for p in response.parsed_output.prompts
+            if p.question.strip() and p.hint.strip()
+        ][: config.THEME_PROMPTS_COUNT]
+        if not prompts:
+            raise AnalysisError("Claude не придумал ни одной темы. Попробуйте ещё раз.")
+        return PromptsResult(
+            prompts=prompts, call=_call_info(response, config.THEME_PROMPTS_MODEL)
+        )
+
+    def write_module_test(
+        self,
+        module_title: str,
+        lessons: Sequence[Dict[str, Any]],
+        avoid: Sequence[str] = (),
+    ) -> ModuleTestResult:
+        """A module's entry test: one choice and one gap per lesson
+        (`lessons`: curriculum.topic_info dicts). The raw ModuleTest comes
+        back as a dict; app.module_test checks and assembles it."""
+        self._require_key()
+        lines = [f"Module: {module_title}", "", "Lessons (key - topic - typical mistakes):"]
+        lines += [
+            f"- {lesson['key']} - {lesson['label']} ({(lesson.get('level') or 'b1').upper()})"
+            f" - {lesson.get('description', '')}"
+            for lesson in lessons
+        ]
+        if avoid:
+            lines += ["", "Sentences used before - do not reuse them:"]
+            lines += [f"- {sentence}" for sentence in avoid]
+        lines += ["", "Write the test."]
+        response = self._call(
+            model=config.MODULE_TEST_MODEL,
+            max_tokens=config.MODULE_TEST_MAX_TOKENS,
+            system=MODULE_TEST_PROMPT,
+            messages=[{"role": "user", "content": "\n".join(lines)}],
+            output_format=ModuleTest,
+            output_config={"effort": config.MODULE_TEST_EFFORT},
+            thinking={"type": "adaptive"},
+        )
+        return ModuleTestResult(
+            test=response.parsed_output.model_dump(),
+            call=_call_info(response, config.MODULE_TEST_MODEL, config.MODULE_TEST_EFFORT),
+        )
+
+    def write_lesson_tasks(
+        self,
+        topic: Dict[str, Any],
+        level: Optional[str],
+        theme: Optional[Dict[str, Optional[str]]] = None,
+    ) -> PromptsResult:
+        """Spoken tasks for a roadmap lesson: each makes the learner use the
+        lesson's construction, in the chosen context. prompts: [{"question",
+        "hint", "use"}]."""
+        self._require_key()
+        request = "\n".join(
+            [
+                f"Lesson topic: {topic['label']} ({topic['key']}) - {topic.get('description', '')}",
+                f"Level: {_LEVEL_NAMES.get(level or '', 'B1')}",
+                f"Context: {themes.model_context(theme)}",
+            ]
+        )
+        response = self._call(
+            model=config.LESSON_TASK_MODEL,
+            max_tokens=config.LESSON_TASK_MAX_TOKENS,
+            system=LESSON_TASKS_PROMPT.format(count=config.LESSON_TASKS_PER_CALL),
+            messages=[{"role": "user", "content": request}],
+            output_format=LessonTasks,
+        )
+        tasks = [
+            {"question": t.question.strip(), "hint": t.hint.strip(), "use": t.use.strip()}
+            for t in response.parsed_output.tasks
+            if t.question.strip() and t.hint.strip()
+        ][: config.LESSON_TASKS_PER_CALL]
+        if not tasks:
+            raise AnalysisError("Claude не придумал ни одного задания. Попробуйте ещё раз.")
+        return PromptsResult(prompts=tasks, call=_call_info(response, config.LESSON_TASK_MODEL))
 
     # -------------------------------------------------------------- helpers
     def _require_key(self) -> None:
@@ -287,12 +518,19 @@ def _call_info(response: Any, model: str, effort: Optional[str] = None) -> Claud
 
 
 def _generation_request(
-    topic: Dict[str, str], seeds: Sequence[Dict[str, Any]], avoid: Sequence[str]
+    topic: Dict[str, str],
+    seeds: Sequence[Dict[str, Any]],
+    avoid: Sequence[str],
+    theme: Optional[Dict[str, Optional[str]]] = None,
+    lesson: Optional[Dict[str, Any]] = None,
 ) -> str:
     lines = [
         f"Topic: {topic['label']} ({topic['key']}) - {topic.get('description', '')}",
+        f"Context: {themes.model_context(theme)}",
         "",
     ]
+    if lesson:
+        lines += _lesson_lines(lesson)
     if seeds:
         lines.append("The learner's own mistakes and rules on this topic (from their speech):")
         for item in seeds:
@@ -314,6 +552,62 @@ def _generation_request(
         lines += [f"- {sentence}" for sentence in avoid]
     lines += ["", "Write the set."]
     return "\n".join(lines)
+
+
+_LEVEL_NAMES: Dict[str, str] = {
+    "a2": "A2 (elementary)", "b1": "B1 (intermediate)",
+    "b2": "B2 (upper-intermediate)", "c1": "C1 (advanced)",
+}
+
+
+def _lesson_lines(lesson: Dict[str, Any]) -> List[str]:
+    """The lesson part of a set request: its level and what its theory taught."""
+    level = _LEVEL_NAMES.get(lesson.get("level") or "", "B1")
+    lines = [f"This set is for a course lesson at level {level}: keep sentences at that level."]
+    theory = lesson.get("theory")
+    if theory:
+        lines.append("The lesson's theory the learner has read - train exactly these points:")
+        lines.append(f"- {theory.get('summary', '')}")
+        for section in theory.get("sections") or []:
+            examples = "; ".join(e.get("english", "") for e in (section.get("examples") or [])[:2])
+            heading, text = section.get("heading", ""), section.get("text", "")
+            lines.append(f"- {heading}: {text} (e.g. {examples})")
+        for point in theory.get("remember") or []:
+            lines.append(f"- remember: {point}")
+        lines.append("Do not copy the theory's example sentences.")
+    lines.append("")
+    return lines
+
+
+def exercise_text(exercise: Dict[str, Any]) -> str:
+    """The sentence an exercise shows: the Russian of a translation, the
+    English of a fix, or a gap sentence with its blank."""
+    text = exercise.get("russian") or exercise.get("sentence")
+    if not text:
+        text = f"{exercise.get('before', '')}{GAP_MARK}{exercise.get('after', '')}"
+    return text.strip()
+
+
+def drop_repeats(
+    exercises: List[Dict[str, Any]], earlier: Sequence[str]
+) -> List[Dict[str, Any]]:
+    """Exercises whose sentence an earlier set on the topic already had are
+    dropped (case, spacing and punctuation aside), and ids renumbered - the
+    prompt asks for new sentences, this makes sure of it."""
+    seen = {_sentence_key(text) for text in earlier}
+    kept = []
+    for exercise in exercises:
+        key = _sentence_key(exercise_text(exercise))
+        if key not in seen:
+            seen.add(key)
+            kept.append(exercise)
+    for number, exercise in enumerate(kept, start=1):
+        exercise["id"] = f"ex{number}"
+    return kept
+
+
+def _sentence_key(text: str) -> str:
+    return " ".join("".join(c.lower() if c.isalnum() or c == "_" else " " for c in text).split())
 
 
 def assemble_exercises(parsed: GeneratedSet) -> List[Dict[str, Any]]:

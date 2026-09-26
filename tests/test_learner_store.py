@@ -20,7 +20,7 @@ ANALYSIS = {
     "language": "en-US",
     "issues": [
         {
-            "topic": "prepositions",
+            "topic": "prepositions_time_place",
             "quote": "responsible of",
             "explanation": "Нужен for.",
             "correction": "responsible for",
@@ -31,7 +31,7 @@ ANALYSIS = {
         }
     ],
     "vocabulary": [{"phrase": "recruiter", "meaning": "рекрутер", "example": "..."}],
-    "topic_counts": {"prepositions": 1},
+    "topic_counts": {"prepositions_time_place": 1},
 }
 
 
@@ -97,7 +97,7 @@ class LearnerStoreTests(unittest.TestCase):
     def test_topic_drill_attempts_are_logged_but_do_not_touch_item_states(self) -> None:
         write_analysed_session(self.root, "s1", dt.datetime(2026, 9, 1, 10), ANALYSIS)
         record = learner_store.append_attempt(
-            None, "cloze", False, topic="articles", score=0.6666, session_id="s1", answer="a | the"
+            None, "cloze", False, topic="articles_basic", score=0.6666, session_id="s1", answer="a | the"
         )
         self.assertEqual(record["score"], 0.667)
         self.assertNotIn("item_id", record)

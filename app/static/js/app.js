@@ -1,6 +1,6 @@
 // Tiny hash router: #/today (home), #/practice[/<topic>] («Занятия»),
 // #/record[/<prompt>], #/picture, #/talk[/<prompt>], #/shadowing[/<session>:<n>],
-// #/dictation[/<videoId>],
+// #/dictation[/<videoId>], #/roadmap, #/speak/<lesson>:<task>, #/moduletest/<module>,
 // #/history, #/session/<id>, #/progress. No build step,
 // no framework - just enough to switch between the view modules loaded above.
 (() => {
@@ -14,6 +14,9 @@
     talk: "practice",
     shadowing: "practice",
     dictation: "practice",
+    roadmap: "practice",
+    speak: "practice",
+    moduletest: "practice",
     history: "history",
     session: "history",
     progress: "progress",

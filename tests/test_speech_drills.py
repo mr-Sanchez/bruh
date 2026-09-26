@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +9,7 @@ from typing import Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import config, learner_model, speech_drills  # noqa: E402
+from app import config, speech_drills  # noqa: E402
 
 
 def timed_words(
@@ -191,15 +190,6 @@ class AlignReadingTests(unittest.TestCase):
         heard = timed_words("I'll explore the codebase.")
         result = speech_drills.align_reading("I’ll explore the codebase.", heard)
         self.assertEqual(result["score"], 1.0)
-
-
-class TalkPromptTests(unittest.TestCase):
-    def test_talk_prompt_differs_from_the_monologue_prompt(self) -> None:
-        for offset in range(30):
-            day = dt.date(2026, 9, 1) + dt.timedelta(days=offset)
-            self.assertNotEqual(
-                speech_drills.talk_prompt_index(day), learner_model.speaking_prompt_index(day)
-            )
 
 
 if __name__ == "__main__":

@@ -28,8 +28,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from app import config
-from app.progress_store import TOPIC_TAXONOMY
+from app import config, curriculum
 from app.utils import AnalysedSession
 
 KIND_FIX = "fix"  # one concrete mistake: quote -> correction
@@ -38,10 +37,10 @@ KIND_PHRASE = "phrase"  # a word or construction to remember (vocabulary/takeawa
 
 _ID_PREFIX: Dict[str, str] = {KIND_FIX: "fix", KIND_PATTERN: "pat", KIND_PHRASE: "phr"}
 
-# Fixes on these topics are about delivery (fillers, restarts), not knowledge
-# that can be recalled on a card: "uh, I, I think" -> "I think". They still
-# count towards topic weakness; spoken drills train them instead.
-NON_RECALL_TOPICS: frozenset = frozenset({"filler_words_fluency", "repetition_self_correction"})
+# Fixes on delivery topics (fillers, restarts) are not knowledge that can be
+# recalled on a card: "uh, I, I think" -> "I think". They still count towards
+# topic weakness; spoken drills train them instead.
+NON_RECALL_TOPICS: frozenset = curriculum.NON_RECALL_TOPICS
 
 _QUOTE_CHARS = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'})
 _EDGE_PUNCTUATION = " \t\n.,!?;:\"'«»…-–—()"
@@ -108,7 +107,8 @@ def items_from_analysis(session: AnalysedSession) -> List[Dict[str, Any]]:
                 "correction": correction,
                 "better_versions": list(issue.get("better_versions") or []),
                 "explanation": issue.get("explanation") or "",
-                "focus": pattern["rule"] if isinstance(pattern, dict) and pattern.get("rule") else "",
+                "focus": pattern["rule"] if pattern_id else "",
+                "focus_examples": list(pattern.get("examples") or []) if pattern_id else [],
                 "drills": clean_drills(issue.get("drills")),
             },
         )
@@ -186,7 +186,7 @@ def clean_drills(value: Any) -> List[Dict[str, str]]:
 
 
 def is_retired(item: Dict[str, Any]) -> bool:
-    """A mistake card with no practice sentences is no longer shown.
+    """A rule card, or a mistake card with no practice sentences, is no longer shown.
 
     Decided 2026-09-26: a card that shows the verbatim quote ("resource the
     code base") loses its context within days, and a long quote hides which
@@ -194,8 +194,32 @@ def is_retired(item: Dict[str, Any]) -> bool:
     existed - and non-English ones, which get none - stay in the bank as
     history (their attempts still count towards topic accuracy) but never
     reach a queue.
+
+    Rule cards ("make up your own example") went the same way: nothing checked
+    the example, and the mistake card behind the rule already drills it with
+    new sentences - the rule is its hint, the rule's examples show after the
+    answer. Rules stay in the bank as history and as AI-set seeds.
+
+    So did grammar notes among phrases ("If + Present Simple, will + verb",
+    "parallel structure in lists") that cannot be blanked out of their
+    example: "recall the phrase" from a paraphrased rule is not a task. A plain
+    word with no gap ("windowsill") is still recalled from its meaning.
     """
-    return item.get("kind") == KIND_FIX and not (item.get("content") or {}).get("drills")
+    kind = item.get("kind")
+    content = item.get("content") or {}
+    if kind == KIND_PATTERN:
+        return True
+    if kind == KIND_PHRASE:
+        phrase = content.get("phrase") or ""
+        if phrase_gap(phrase, content.get("example") or "") is not None:
+            return False
+        return _is_formula(phrase) or item.get("sources") == ["takeaways"]
+    return kind == KIND_FIX and not content.get("drills")
+
+
+def _is_formula(phrase: str) -> bool:
+    """A phrase written as notation ("help + verb-ing", "a / an"), not as text."""
+    return "+" in phrase or "/" in phrase
 
 
 # ------------------------------------------------------------------ Leitner
@@ -392,9 +416,51 @@ def topic_mastery(
     return rows
 
 
+def area_mastery(topic_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Topic mastery rolled up to areas (taxonomy v2's coarse level).
+
+    Weakness, priority and card counts add up; accuracy is the mean over the
+    topics' recent answers, so a topic drilled 20 times weighs more than one
+    drilled once. Highest priority first, like the topic rows.
+    """
+    areas: Dict[str, Dict[str, Any]] = {}
+    for row in topic_rows:
+        key = curriculum.area_of(row["key"])
+        area = areas.setdefault(
+            key,
+            {
+                "key": key,
+                "topics": [],
+                "weakness_score": 0.0,
+                "priority": 0.0,
+                "recent_attempts": 0,
+                "items": 0,
+                "due_items": 0,
+                "closed_items": 0,
+                "_answered": 0.0,
+            },
+        )
+        area["topics"].append(row["key"])
+        for field_ in ("weakness_score", "priority", "items", "due_items", "closed_items"):
+            area[field_] += row[field_]
+        if row["accuracy"] is not None:
+            area["recent_attempts"] += row["recent_attempts"]
+            area["_answered"] += row["accuracy"] * row["recent_attempts"]
+    result = []
+    for area in areas.values():
+        answered = area.pop("_answered")
+        count = area["recent_attempts"]
+        area["accuracy"] = round(answered / count, 3) if count else None
+        area["weakness_score"] = round(area["weakness_score"], 4)
+        area["priority"] = round(area["priority"], 4)
+        result.append(area)
+    result.sort(key=lambda row: (row["priority"], row["due_items"]), reverse=True)
+    return result
+
+
 # -------------------------------------------------------------- daily queue
 _SEVERITY_RANK: Dict[Optional[str], int] = {"major": 2, "moderate": 1, "minor": 0}
-# New cards are interleaved: this many mistake-derived cards (fix/pattern),
+# New cards are interleaved: this many mistake cards,
 # then one phrase, so vocabulary keeps flowing without crowding out errors.
 _ISSUE_CARDS_PER_PHRASE = 2
 
@@ -491,7 +557,7 @@ def card_exercise(item: Dict[str, Any], state: ItemState) -> Dict[str, Any]:
     that went wrong; every attempt moves on to the next of its sentences, so
     a review is never the same sentence twice in a row. The answer is free
     text, so Claude checks it (POST /api/learner/cards/<id>/check). Anything
-    code cannot check fairly - rules, phrases that are really grammar notes
+    code cannot check fairly - phrases that are really grammar notes
     ("help + verb-ing") - is a self-graded flashcard.
     """
     content = item.get("content") or {}
@@ -540,11 +606,11 @@ def phrase_gap(phrase: str, example: str) -> Optional[Dict[str, Any]]:
 SET_EXERCISE = "ai_set"  # attempts-log `exercise` of a finished set
 # Topics a set can train: not delivery (spoken drills do that), and not the
 # "other" catch-all, which is no single thing to write exercises about.
-SET_EXCLUDED_TOPICS: frozenset = NON_RECALL_TOPICS | {"other"}
+SET_EXCLUDED_TOPICS: frozenset = NON_RECALL_TOPICS | {curriculum.OTHER_TOPIC}
 
 
 def set_topic_allowed(topic: str) -> bool:
-    return topic in TOPIC_TAXONOMY and topic not in SET_EXCLUDED_TOPICS
+    return curriculum.is_topic(topic) and topic not in SET_EXCLUDED_TOPICS
 
 
 _NON_WORD = re.compile(r"[^\w'\s]", flags=re.UNICODE)
@@ -583,7 +649,9 @@ def items_from_set_run(
       gap        the sentence with the learner's filler -> with the right one;
       fix        the set's faulty sentence -> its correction;
       translate  the learner's translation -> Claude's minimal correction of
-                 it, with the reference as a "more natural" version.
+                 it, with the reference as a "more natural" version, filed
+                 under the topic Claude tagged the mistake with (2026-09-26;
+                 the set's topic for runs graded before that).
 
     Only a translation has a Russian sentence to practise with, so only it
     becomes a live card (its drill is the set's own sentence); gap and fix
@@ -607,6 +675,7 @@ def items_from_set_run(
         explanation = exercise.get("explanation") or ""
         better: List[str] = []
         drills: List[Dict[str, str]] = []
+        topic = exercise_set.get("topic")
         if exercise.get("type") == "gap" and accept:
             before, after = exercise.get("before", ""), exercise.get("after", "")
             quote = f"{before}{answer or '___'}{after}"
@@ -622,6 +691,8 @@ def items_from_set_run(
                 better = [reference]
             explanation = result.get("comment") or ""
             drills = clean_drills([{"russian": exercise.get("russian"), "english": reference}])
+            if curriculum.is_topic(result.get("topic")):
+                topic = result["topic"]
         else:
             continue
         if not normalize_text(correction) or normalize_answer(quote) == normalize_answer(correction):
@@ -631,7 +702,7 @@ def items_from_set_run(
                 "id": item_id(KIND_FIX, correction),
                 "kind": KIND_FIX,
                 "language": exercise_set.get("language", "en"),
-                "topic": exercise_set.get("topic"),
+                "topic": topic,
                 "severity": "moderate",
                 "pattern_id": None,
                 "origin": SET_EXERCISE,
@@ -650,11 +721,6 @@ def items_from_set_run(
 
 
 # ------------------------------------------------------------ daily workout
-def speaking_prompt_index(today: dt.date) -> int:
-    """Today's monologue prompt: a different one each day, cycling the list."""
-    return today.toordinal() % len(config.SPEAKING_PROMPTS)
-
-
 def activity_streak(active_days: Iterable[dt.date], today: dt.date) -> int:
     """Consecutive active days up to today.
 

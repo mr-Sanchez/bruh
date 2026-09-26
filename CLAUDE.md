@@ -16,7 +16,7 @@ python -m unittest discover -s tests -v    :: full suite (offline, no API keys)
 python -m unittest tests.test_api -v       :: one module
 ```
 
-Python 3.11+ (`Literal[*TOPIC_KEYS]` in `analyzer.py`); the venv is 3.12.
+Python 3.11+ (`Literal[*curriculum.TOPIC_KEYS]` in `analyzer.py`); the venv is 3.12.
 `APP_HOST` / `APP_PORT` override the listen address.
 
 ## Architecture
@@ -26,20 +26,27 @@ app/main.py             entry point: env, logging, mkdirs, uvicorn, browser, --s
 app/server.py           /api router FIRST, then StaticFiles("/") catch-all (Cache-Control: no-cache)
 app/api.py              all /api/* routes; thin HTTP glue, orchestrates everything below
 app/config.py           single source of truth: paths, constants, LANGUAGE_PROFILES, env, logging
+app/curriculum.py       pure data: areas → topics (taxonomy v2), levels → modules → lessons
+app/themes.py           pure data: contexts «уклон» + hand-written speaking prompts
 app/utils.py            Session dataclass (owns every per-session file path), fs helpers
 app/transcriber.py      Deepgram layer
 app/analyzer.py         Claude: monologue / picture analysis, topic tagging
-app/exercise_sets.py    Claude: AI exercise sets (generate: Sonnet 5 low; grade: Haiku 4.5)
+app/exercise_sets.py    Claude: AI exercise sets (generate + grade: Sonnet 5 low)
 app/dictation_translation.py  Claude (Haiku): cut a lesson into parts, review a translation
+app/theory.py           Claude: a roadmap lesson's theory (Sonnet 5 low)
 app/speech_drills.py    pure: pace, fillers, pauses, shadowing alignment from word timings
 app/dictation.py        pure: WebVTT parsing, sentences, word checking, translation parts
 app/learner_model.py    pure: item bank, Leitner state, topic mastery
+app/module_test.py      pure: a module entry test - assemble, hide answers, grade
+app/roadmap.py          pure: roadmap lesson statuses, «Продолжить»
 app/youtube.py          the only place that talks to YouTube (yt-dlp)
 app/dictation_store.py  the ONLY reader/writer of dictation lessons
 app/learner_store.py    the ONLY reader/writer of learner-model files; usage/cost log
 app/progress_store.py   topic aggregation + score history → data/progress.json
+app/theme_store.py      the ONLY reader/writer of data/themes.json (own contexts, last used)
 app/static/js/          app.js (hash router), api.js, drill.js, recorder.js (shared by every
-                        spoken activity), charts.js, translation.js, views/*.js
+                        spoken activity), themes.js (the «уклон» picker), charts.js,
+                        translation.js, views/*.js
 ```
 
 Library modules stay framework-agnostic and are built through factory dependencies
@@ -56,7 +63,12 @@ data/attempts.jsonl                AUTHORITATIVE, append-only — every exercise
 data/progress.json, item_bank.json derived caches, rebuilt from analysis.json files
 data/usage.jsonl                   append-only — tokens/minutes + cost per paid call
 data/card_verdicts.jsonl           append-only cache of Claude's card checks
+data/roadmap_marks.jsonl           AUTHORITATIVE, append-only — «уже знаю» / «пропустить»
+data/themes.json                   own contexts, last used, Claude-written prompts (paid)
 data/practice/<set-id>.json        AI sets + runs + verdicts; paid, NOT rebuildable
+data/theory/<lesson>.json          every version of a lesson's theory; paid, NOT rebuildable
+data/lesson_tasks/<lesson>.json    spoken tasks Claude wrote for a lesson; paid, append-only
+data/module_tests/<module>.json    module entry tests + every run; paid, append-only
 data/dictation/<video-id>/         lesson.json, audio.<ext>, subtitles.vtt, parts.json,
                                    results.jsonl (AUTHORITATIVE), translations.jsonl (paid)
 logs/app.log                       rotating, 1 MB × 4
@@ -73,6 +85,9 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
   `POST .../analyze` is a separate user action.
 * **Picture** (`kind=picture` + `image`, ≤ 1000 px JPEG from the browser, type sniffed
   server-side): may send `text` instead of audio → stored verbatim, `done` at once, no Deepgram.
+* **Lesson spoken task:** a monologue with `lesson_id` + `task_id` (`session.json` `lesson`);
+  `/analyze` checks the lesson's rule (`analysis.json` `lesson.check`) and logs one
+  `lesson_task` attempt per take.
 * **Spoken drills** (`kind=talk` / `kind=shadowing`, details in `session.json`'s `drill`):
   measured, not analysed; one `filler_words_fluency` attempt is logged, `/analyze` refuses them.
 * **Dictation:** `POST /api/dictation/lessons` (YouTube link) → background yt-dlp import →
@@ -109,10 +124,19 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
   the lesson dir, never `attempts.jsonl` / item bank. They surface as «сложные слова» and count
   for the streak and the daily workout.
 * **A mistake card is a new sentence, never the quote** (2026-09-26): built from
-  `issues[].drills`, checked by Haiku (`card_grading`) on click. A fix item without drills is
-  retired (`learner_model.is_retired`): kept, never queued.
-* **`TOPIC_TAXONOMY` is a closed set** driving the schema, the prompt and `progress.json` —
-  changing it is a coordinated migration with a `schema_version` bump.
+  `issues[].drills`, checked by Sonnet (`card_grading`) on click. A fix item without drills is
+  retired (`learner_model.is_retired`): kept, never queued. Rule (`pattern`) items are retired
+  too — the rule and its examples show on the mistake card after the answer — and so are
+  phrases that are grammar notes with no gap (a formula, or a takeaway only).
+* **Every generation takes a context «уклон»** (a `theme`, 2026-09-26): AI sets, analysis
+  drills, own-theme speaking prompts; default = the last one used (IT / бэкенд first).
+  Theory never follows it. `context` in attempts means the screen, not the theme.
+* **`curriculum.py` is the closed catalogue** (taxonomy v2, 2026-09-26): 15 areas → 76
+  topics; a roadmap lesson teaches one topic and its id **is** the topic key. It drives the
+  analysis/grading schema and prompts, `progress.json`, the item bank and every label.
+  Authored by hand, never generated; keys are stable — changing one is a migration, and
+  any change bumps `ANALYSIS_SCHEMA_VERSION`, `progress_store.SCHEMA_VERSION` and
+  `BANK_SCHEMA_VERSION`. Unknown (older) keys count as area «other».
 
 ## Conventions
 
@@ -137,7 +161,8 @@ word-level responses for other tests. Keep `--selftest` in sync when a request p
 
 ## Plan
 
-`progress.md` is the working plan — read it before feature work. Stages 1–7 are done; next
+`progress.md` is the working plan — read it before feature work. Stages 1–8 are done (8: the
+A2 → C1 roadmap - lessons with theory, sets, a spoken task, module tests, «Урок дня»); next
 candidates are under «Later». All activities feed one learner model (item bank +
 `attempts.jsonl` + Leitner) behind the daily «Сегодня» workout. Budget: ≤ ~8–10 ¢ of Claude
 per exercise; 7–10 new cards a day. PyInstaller packaging is deferred, but

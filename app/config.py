@@ -191,6 +191,14 @@ CARD_VERDICTS_FILENAME: Final[str] = "card_verdicts.jsonl"
 # attempts log at this score; the exact score feeds topic accuracy.
 DRILL_PASS_SCORE: Final[float] = 0.8
 
+# --- Roadmap (Stage 8) --------------------------------------------------------
+# The learner's own marks on lessons («Пропустить», «Уже знаю»): append-only,
+# authoritative like attempts.jsonl - the latest mark on a lesson wins.
+ROADMAP_MARKS_FILENAME: Final[str] = "roadmap_marks.jsonl"
+# A lesson is mastered after this many set runs at DRILL_PASS_SCORE or better,
+# on different days (decided 2026-09-26, a first guess).
+LESSON_MASTERY_RUNS: Final[int] = 2
+
 # --- «Сегодня» daily workout (Stage 3) -----------------------------------
 # The workout aims at ~10 minutes: cards, one live activity, dictation.
 # Cards past WORKOUT_MAX_CARDS stay in the queue and can be done on «Занятия».
@@ -200,69 +208,55 @@ WORKOUT_MINUTES_MONOLOGUE: Final[float] = 3.0
 # How many days of exercise history the «История» tab shows.
 ACTIVITY_HISTORY_DAYS: Final[int] = 60
 
-# Monologue prompts, one per day (picked by date), mostly IT / work life.
-# The question is in English (the practiced language); the hint is UI text.
-SPEAKING_PROMPTS: Final[tuple] = (
-    ("Tell me about a project you worked on recently. What was your part in it?",
-     "Недавний проект и ваша роль в нём"),
-    ("Describe a typical working day from the morning to the evening.",
-     "Типичный рабочий день"),
-    ("What was the hardest bug or problem you solved at work? How did you find it?",
-     "Самая сложная проблема на работе"),
-    ("Explain what your company or team does to someone who is not in IT.",
-     "Чем занимается ваша команда — простыми словами"),
-    ("Tell me about a tool or technology you started using recently. Would you recommend it?",
-     "Новый инструмент или технология"),
-    ("What do you like about remote work, and what do you miss about the office?",
-     "Удалёнка и офис"),
-    ("Describe a meeting that went badly. What would you do differently?",
-     "Неудачная встреча"),
-    ("How do you learn new things? Give an example from the last month.",
-     "Как вы учитесь новому"),
-    ("Tell me about a colleague you enjoy working with and why.",
-     "Коллега, с которым приятно работать"),
-    ("What would you change in your current work process if you could?",
-     "Что бы вы изменили в рабочем процессе"),
-    ("Describe your last vacation or a trip you remember well.",
-     "Последний отпуск или поездка"),
-    ("You are in a job interview. Introduce yourself and your experience.",
-     "Собеседование: расскажите о себе"),
-    ("How do you plan your week? What helps you stay focused?",
-     "Как вы планируете неделю"),
-    ("Tell me about a mistake you made at work and what you learned from it.",
-     "Ошибка на работе и вывод из неё"),
-    ("What is a book, film or series you liked recently? Retell the idea.",
-     "Книга, фильм или сериал"),
-    ("Explain how you would onboard a new person on your team.",
-     "Как ввести новичка в команду"),
-    ("What are your goals for the next year, at work and outside of it?",
-     "Цели на год"),
-    ("Describe a disagreement with a manager or client and how it was resolved.",
-     "Разногласие и как его решили"),
-    ("What does a good code review or a good report look like for you?",
-     "Каким должно быть хорошее ревью / отчёт"),
-    ("Tell me about your hobby and how you got into it.",
-     "Ваше хобби"),
-)
+# Speaking prompts (monologue, «60 секунд») live in app/themes.py since
+# 2026-09-26: one list per context («уклон»), one prompt per day.
 
-# External references per topic: free online deep links, no API calls. No
-# textbook references - decided 2026-09-19, the learner does not study from books.
-_CAMBRIDGE_GRAMMAR: Final[str] = "https://dictionary.cambridge.org/grammar/british-grammar/"
-TOPIC_RESOURCES: Final[dict] = {
-    "verb_tense": (
-        ("Cambridge Grammar: Tenses and time", _CAMBRIDGE_GRAMMAR + "tenses-and-time"),
-        ("Cambridge Grammar: Conditionals", _CAMBRIDGE_GRAMMAR + "conditionals-and-wishes"),
-    ),
-    "articles": (("Cambridge Grammar: A/an and the", _CAMBRIDGE_GRAMMAR + "a-an-and-the"),),
-    "prepositions": (("Cambridge Grammar: Prepositions", _CAMBRIDGE_GRAMMAR + "prepositions"),),
-    "word_order": (("Cambridge Grammar: Word order", _CAMBRIDGE_GRAMMAR + "word-order-and-focus"),),
-    "subject_verb_agreement": (
-        ("Cambridge Grammar: Subject-verb agreement", _CAMBRIDGE_GRAMMAR + "subject-verb-agreement"),
-    ),
-    "sentence_structure": (
-        ("Cambridge Grammar: Relative clauses", _CAMBRIDGE_GRAMMAR + "relative-clauses"),
-    ),
-}
+# --- Lesson theory (Stage 8, R4) ----------------------------------------------
+# A roadmap lesson's theory: one Claude call on a click, kept per lesson in
+# data/theory/<lesson>.json. «Сгенерировать заново» adds a version and keeps
+# the old ones (paid for, never rewritten). Not tied to a context «уклон».
+THEORY_MODEL: Final[str] = "claude-sonnet-5"
+THEORY_EFFORT: Final[str] = "low"
+THEORY_MAX_TOKENS: Final[int] = 8_000
+THEORY_DIRNAME: Final[str] = "theory"
+# The learner's own mistakes on the topic the theory comments on.
+THEORY_OWN_MISTAKES: Final[int] = 6
+# Shown next to the button until the usage log has a real average.
+THEORY_COST_ESTIMATE_USD: Final[float] = 0.03
+
+# --- Lesson spoken task (Stage 8, R6) ---------------------------------------------
+# 1-2 minutes of speech that needs the lesson's rule. Haiku writes the tasks
+# on a click (a few per context, kept in data/lesson_tasks/<lesson>.json); the
+# take is an ordinary monologue analysed with the rule in focus, and its rule
+# score is logged once as a topic attempt of this exercise.
+LESSON_TASK_MODEL: Final[str] = "claude-haiku-4-5"
+LESSON_TASKS_PER_CALL: Final[int] = 3
+LESSON_TASK_MAX_TOKENS: Final[int] = 1_500
+LESSON_TASKS_DIRNAME: Final[str] = "lesson_tasks"
+LESSON_TASK_EXERCISE: Final[str] = "lesson_task"
+
+# --- Module entry test (Stage 8, R7) -----------------------------------------------
+# A short test over a whole module, to mark what the learner already knows
+# honestly. Claude writes it on a click (kept, redone for free); every answer
+# is a choice or a gap, so it is checked on the server without a model call.
+MODULE_TEST_MODEL: Final[str] = "claude-sonnet-5"
+MODULE_TEST_EFFORT: Final[str] = "low"
+MODULE_TEST_MAX_TOKENS: Final[int] = 6_000
+MODULE_TEST_DIRNAME: Final[str] = "module_tests"
+MODULE_TEST_EXERCISE: Final[str] = "module_test"
+# One multiple-choice question and one gap per lesson (app/module_test.py); a
+# lesson counts as known when all of its questions are right.
+MODULE_TEST_COST_ESTIMATE_USD: Final[float] = 0.03
+
+# --- Contexts «уклон» (Stage 8, R3) ------------------------------------------
+# The learner's own contexts, the last one used and the prompts Claude wrote
+# for own contexts (paid, so kept; app/theme_store.py).
+THEMES_FILENAME: Final[str] = "themes.json"
+THEMES_MAX_CUSTOM: Final[int] = 30
+# Speaking prompts for an own context: one Haiku call on a click, ~0.1 cent.
+THEME_PROMPTS_MODEL: Final[str] = "claude-haiku-4-5"
+THEME_PROMPTS_COUNT: Final[int] = 8
+THEME_PROMPTS_MAX_TOKENS: Final[int] = 2_000
 
 # --- Activities & picture description (Stage 4) ---------------------------
 # session.json `kind`: which activity produced the session. Sessions written
@@ -303,19 +297,24 @@ IMAGE_MAX_SIDE_PX: Final[int] = 1000
 EXERCISE_SET_MODEL: Final[str] = "claude-sonnet-5"
 EXERCISE_SET_EFFORT: Final[str] = "low"
 EXERCISE_SET_MAX_TOKENS: Final[int] = 8_000
-# Grading short translations against a reference is an easy judgement, so the
-# cheapest model does it (Haiku 4.5 takes no effort setting; thinking is off).
-GRADING_MODEL: Final[str] = "claude-haiku-4-5"
-GRADING_MAX_TOKENS: Final[int] = 4_000
+# Grading translations (a set's, and a card's on click) - Sonnet since
+# 2026-09-26: Haiku failed right answers ("a call" for "the call") and named
+# the wrong mistake, and its comment becomes the card's explanation. It also
+# tags each mistake with its own topic. ~1 cent per set; low effort is enough.
+GRADING_MODEL: Final[str] = "claude-sonnet-5"
+GRADING_EFFORT: Final[str] = "low"
+GRADING_MAX_TOKENS: Final[int] = 6_000
 EXERCISE_API_TIMEOUT_SECONDS: Final[int] = 180
 # How many of each exercise a set asks for (easy to hard, in this order).
 SET_GAPS: Final[int] = 3
 SET_FIXES: Final[int] = 2
 SET_TRANSLATIONS: Final[int] = 4
 # The learner's own items on the topic shown to the generator as seeds, and
-# earlier set sentences on the topic it is told not to repeat.
+# earlier set sentences on the topic it is told not to repeat - enough for
+# ~10 sets (≈ 1.5k input tokens); an exercise that still repeats any earlier
+# sentence of the topic is dropped after generation (R5, 2026-09-26).
 SET_SEED_ITEMS: Final[int] = 8
-SET_AVOID_SENTENCES: Final[int] = 16
+SET_AVOID_SENTENCES: Final[int] = 90
 # Shown next to the button until the usage log has a real average.
 SET_COST_ESTIMATE_USD: Final[float] = 0.03
 WORKOUT_MINUTES_SET: Final[float] = 6.0
@@ -472,6 +471,21 @@ def data_dir() -> Path:
 def practice_dir() -> Path:
     """AI exercise sets (data/practice/<set id>.json)."""
     return data_dir() / PRACTICE_DIRNAME
+
+
+def theory_dir() -> Path:
+    """Lesson theory, every version (data/theory/<lesson id>.json)."""
+    return data_dir() / THEORY_DIRNAME
+
+
+def lesson_tasks_dir() -> Path:
+    """Spoken tasks of roadmap lessons (data/lesson_tasks/<lesson id>.json)."""
+    return data_dir() / LESSON_TASKS_DIRNAME
+
+
+def module_tests_dir() -> Path:
+    """Module entry tests and their runs (data/module_tests/<module key>.json)."""
+    return data_dir() / MODULE_TEST_DIRNAME
 
 
 def dictation_dir() -> Path:

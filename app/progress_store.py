@@ -1,7 +1,7 @@
 """Cross-session progress tracking: which topics keep coming up, and how badly.
 
 Each analysis (see app/analyzer.py) tags every mistake with a topic from the
-fixed TOPIC_TAXONOMY below. This module aggregates those tags across every
+closed catalogue in app/curriculum.py. This module aggregates those tags across every
 session into data/progress.json, so the app can answer "what should I
 practice?" without re-reading every analysis.json on every request.
 
@@ -23,64 +23,14 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app import config, utils
+from app import config, curriculum, utils
 
 logger = logging.getLogger(__name__)
 
-# Fixed, closed set of topics. Changing this later means a coordinated
-# prompt/schema/progress.json migration (see schema_version fields).
-TOPIC_TAXONOMY: Dict[str, Dict[str, str]] = {
-    "verb_tense": {
-        "label": "Видо-временные формы глагола",
-        "description": "неправильное время или вид глагола (например, went vs go)",
-    },
-    "articles": {
-        "label": "Артикли (a / an / the)",
-        "description": "пропущенный, лишний или неверно выбранный артикль",
-    },
-    "word_order": {
-        "label": "Порядок слов",
-        "description": "неверный порядок слов в предложении",
-    },
-    "prepositions": {
-        "label": "Предлоги",
-        "description": "неверно выбранный или пропущенный предлог",
-    },
-    "subject_verb_agreement": {
-        "label": "Согласование подлежащего и сказуемого",
-        "description": "рассогласование числа/лица между подлежащим и глаголом",
-    },
-    "lexical_choice": {
-        "label": "Выбор слов / ложные друзья переводчика",
-        "description": "неверно выбранное слово, калька или ложный друг переводчика",
-    },
-    "sentence_structure": {
-        "label": "Структура предложения",
-        "description": "незаконченные, рубленые или запутанные предложения",
-    },
-    "filler_words_fluency": {
-        "label": "Слова-паразиты и беглость речи",
-        "description": "частые слова-паразиты, паузы и запинки, мешающие беглости",
-    },
-    "repetition_self_correction": {
-        "label": "Повторы и самокоррекции",
-        "description": "повторение слов/фраз, частые самокоррекции по ходу речи",
-    },
-    "register_naturalness": {
-        "label": "Естественность речи",
-        "description": "грамматически верно, но неестественно звучит для носителя языка",
-    },
-    "other": {
-        "label": "Прочее",
-        "description": "любая другая проблема, не подходящая под перечисленные темы",
-    },
-}
-
-TOPIC_KEYS: tuple = tuple(TOPIC_TAXONOMY.keys())
-
 # v2: score_history added; topic dates are when the speech was recorded, and
 # the whole file is rebuilt from analysis.json files on every analysis.
-SCHEMA_VERSION = 2
+# v3: topics are taxonomy v2 (app/curriculum.py), each row names its area.
+SCHEMA_VERSION = 3
 
 # Recency half-life for the weakness score: a topic last seen this many days
 # ago counts for half as much as one seen today, regardless of its raw count.
@@ -141,11 +91,11 @@ def top_weak_topics(n: int = 10, now: Optional[dt.datetime] = None) -> List[Dict
     data = load_progress()
     ranked = []
     for key, entry in data["topics"].items():
-        taxonomy_entry = TOPIC_TAXONOMY.get(key, {"label": key, "description": ""})
         ranked.append(
             {
                 "key": key,
-                "label": taxonomy_entry["label"],
+                "label": curriculum.topic_label(key),
+                "area": curriculum.area_of(key),
                 "count": entry.get("count", 0),
                 "last_seen": entry.get("last_seen"),
                 "first_seen": entry.get("first_seen"),

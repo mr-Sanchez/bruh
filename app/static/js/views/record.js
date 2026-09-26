@@ -96,19 +96,23 @@ Views.record = (() => {
         1–2 минуты. После анализа Claude подскажет, что вы не упомянули, и даст слова для этой сцены.</p>`;
   }
 
-  // `param` is a speaking-prompt index when the view is opened from «Сегодня»
-  // (#/record/<index>); a plain #/record is a free monologue. `mode` is
+  // `param` is a speaking-prompt id when the view is opened from «Сегодня»
+  // (#/record/<theme>:<n>); a plain #/record is a free monologue. `mode` is
   // "picture" for the picture description.
   async function render(root, param, mode) {
     container = root;
     const picture = mode === "picture";
-    const promptIndex = !picture && /^\d+$/.test(param || "") ? Number(param) : null;
+    // A lesson's spoken task (#/speak/<lesson>:<task>): a monologue on that task.
+    const [lessonId, taskId] =
+      mode === "lesson" && param ? decodeURIComponent(param).split(":") : [null, null];
+    const promptId = !picture && !lessonId && param ? decodeURIComponent(param) : null;
     container.appendChild(
       el(`
-      ${promptIndex == null ? "" : `<p><a href="#/today">← Сегодня</a></p>`}
+      ${promptId == null ? "" : `<p><a href="#/today">← Сегодня</a></p>`}
       ${picture ? `<p><a href="#/practice">← Занятия</a></p>` : ""}
+      ${lessonId ? `<p><a href="#/practice/${encodeURIComponent(lessonId)}">← К уроку</a></p>` : ""}
       <div class="card">
-        <h2>${picture ? "Описание картинки" : "Монолог"}</h2>
+        <h2>${picture ? "Описание картинки" : lessonId ? "Устное задание урока" : "Монолог"}</h2>
         <div id="prompt-slot"></div>
         ${picture ? pictureCard() : ""}
         <p class="muted" id="voice-hint">Говорите свободно — слова-паразиты, паузы, ошибки и незаконченные фразы
@@ -150,6 +154,7 @@ Views.record = (() => {
           <button id="analyze-btn" class="secondary">Анализировать (Claude)</button>
           <button id="copy-btn" class="secondary">Скопировать</button>
         </div>
+        <div id="analyze-theme"></div>
         <div id="analysis-slot"></div>
       </div>
     `)
@@ -174,24 +179,34 @@ Views.record = (() => {
       .join("");
     langSelect.value = cfg.default_language;
 
-    if (promptIndex != null && cfg.speaking_prompts.length) {
-      let shown = promptIndex % cfg.speaking_prompts.length;
+    let lessonTask = null;
+    if (lessonId) {
       const slot = container.querySelector("#prompt-slot");
-      const showPrompt = () => {
-        const prompt = cfg.speaking_prompts[shown];
-        slot.innerHTML = `
-          <div class="speaking-prompt">
-            <div class="muted">Тема: ${escapeHtml(prompt.hint)}</div>
-            <p class="speaking-question">${escapeHtml(prompt.question)}</p>
-            <p class="muted">Говорите 1–3 минуты. Потом нажмите «Анализировать» — ошибки попадут в карточки.</p>
-            <button type="button" class="secondary" id="next-prompt">Другая тема</button>
-          </div>`;
-        slot.querySelector("#next-prompt").addEventListener("click", () => {
-          shown = (shown + 1) % cfg.speaking_prompts.length;
-          showPrompt();
-        });
-      };
-      showPrompt();
+      try {
+        const data = await Api.getLessonTasks(lessonId);
+        lessonTask = data.tasks.find((t) => t.id === taskId) || null;
+        slot.innerHTML = lessonTask
+          ? `<div class="speaking-prompt">
+               <div class="muted">${escapeHtml(data.lesson.label)} · ${escapeHtml(lessonTask.hint)}</div>
+               <p class="speaking-question">${escapeHtml(lessonTask.question)}</p>
+               ${lessonTask.use ? `<p><strong>Используйте:</strong> ${escapeHtml(lessonTask.use)}</p>` : ""}
+               <p class="muted">Говорите 1–2 минуты. После «Анализировать» Claude отдельно оценит,
+                 как вы применили правило урока; ошибки попадут в карточки.</p>
+             </div>`
+          : `<p class="muted">Задание не найдено — вернитесь к уроку.</p>`;
+      } catch (err) {
+        slot.innerHTML = `<p class="muted">Задание не загрузилось: ${escapeHtml(err.message)}</p>`;
+      }
+      if (!lessonTask) startBtn.disabled = true;
+    }
+
+    if (promptId != null) {
+      ThemePicker.mountPrompts(container.querySelector("#prompt-slot"), {
+        promptId,
+        note: "Говорите 1–3 минуты. Потом нажмите «Анализировать» — ошибки попадут в карточки.",
+      }).catch((err) => {
+        container.querySelector("#prompt-slot").innerHTML = `<p class="muted">Темы не загрузились: ${escapeHtml(err.message)}</p>`;
+      });
     }
 
     const warnings = [];
@@ -357,6 +372,7 @@ Views.record = (() => {
           mimeType: blob.type,
           kind: picture ? "picture" : "monologue",
           image: picture ? pictureBlob : null,
+          lesson: lessonTask ? { lesson_id: lessonId, task_id: lessonTask.id } : null,
         });
         if (result.status === "error") {
           setStatus("Ошибка", "error");
@@ -407,12 +423,14 @@ Views.record = (() => {
       const slot = container.querySelector("#analysis-slot");
 
       await renderAnalysis(slot, session.analysis);
+      const picker = await ThemePicker.mountForAnalysis(container.querySelector("#analyze-theme"), session.language);
 
       analyzeBtn.onclick = async () => {
         analyzeBtn.disabled = true;
         analyzeBtn.textContent = "Анализируем...";
         try {
-          const result = await Api.analyzeSession(session.id, !!session.analysis);
+          const theme = picker ? picker.value() : null;
+          const result = await Api.analyzeSession(session.id, !!session.analysis, theme);
           session.analysis = result.analysis;
           await renderAnalysis(slot, result.analysis);
         } catch (err) {
@@ -450,6 +468,11 @@ Views.record = (() => {
 })();
 
 // «Описание картинки» (#/picture): the recorder in picture mode.
+Views.speak = {
+  render: (container, param) => Views.record.render(container, param, "lesson"),
+  dispose: () => Views.record.dispose(),
+};
+
 Views.picture = {
   render: (container, param) => Views.record.render(container, param, "picture"),
   dispose: () => Views.record.dispose(),

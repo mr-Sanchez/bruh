@@ -118,7 +118,7 @@ const Drill = (() => {
   }
 
   // ------------------------------------------------------------- cards
-  const KIND_LABELS = { fix: "Ошибка", pattern: "Правило", phrase: "Фраза" };
+  const KIND_LABELS = { fix: "Ошибка", phrase: "Фраза" };
 
   function cardPrompt(item) {
     const c = item.content || {};
@@ -133,11 +133,6 @@ const Drill = (() => {
             ? `<details class="card-hint"><summary>Подсказка</summary>${escapeHtml(ex.focus)}</details>`
             : ""
         }`;
-    }
-    if (item.kind === "pattern") {
-      return `
-        <div class="pattern-box"><div class="pattern-rule">${escapeHtml(c.rule)}</div></div>
-        <p class="task">Придумайте свой пример на это правило, затем сравните с образцами</p>`;
     }
     if (type === "gap") {
       return `<p>${escapeHtml(c.meaning)}</p><p class="task">Впишите фразу в пропуск</p>`;
@@ -159,8 +154,9 @@ const Drill = (() => {
     return `<textarea data-role="input" rows="2" placeholder="${placeholder}" spellcheck="false"></textarea>`;
   }
 
-  // Where a mistake card came from: the learner's own mistake, shown only
-  // after the answer - the card itself is a new sentence on the same rule.
+  // Where a mistake card came from: the learner's own mistake and the rule
+  // behind it, shown only after the answer - the card itself is a new
+  // sentence on the same rule.
   function cardSource(item) {
     const c = item.content || {};
     const first = (item.occurrences || [])[0] || {};
@@ -169,12 +165,21 @@ const Drill = (() => {
       ? `Из вашей записи от ${date} · <a href="#/session/${encodeURIComponent(first.session_id)}">открыть</a>`
       : `Из AI-набора от ${date}`;
     const better = (c.better_versions || []).filter(Boolean);
+    const examples = (c.focus_examples || []).filter(Boolean);
     return `
       <div class="card-source">
         <p class="muted">${origin}</p>
         <p class="quote">❌ «${escapeHtml(c.quote)}»</p>
         <p class="correction">✅ ${escapeHtml(c.correction)}</p>
         ${c.explanation ? `<p>${escapeHtml(c.explanation)}</p>` : ""}
+        ${
+          c.focus
+            ? `<div class="pattern-box">
+                 <div class="pattern-rule">Правило: ${escapeHtml(c.focus)}</div>
+                 ${examples.map((e) => `<div class="pattern-example">${escapeHtml(e)}</div>`).join("")}
+               </div>`
+            : ""
+        }
         ${
           better.length
             ? `<div class="better-versions"><span class="muted">Проще / естественнее:</span>
@@ -187,11 +192,6 @@ const Drill = (() => {
   function cardBack(item) {
     const c = item.content || {};
     if (item.kind === "fix") return cardSource(item);
-    if (item.kind === "pattern") {
-      return `<div class="pattern-box">
-        ${(c.examples || []).map((e) => `<div class="pattern-example">${escapeHtml(e)}</div>`).join("")}
-      </div>`;
-    }
     return `
       <p><span class="phrase">${escapeHtml(c.phrase)}</span> <span class="muted">— ${escapeHtml(c.meaning)}</span></p>
       ${c.example ? `<p class="phrase-example">${escapeHtml(c.example)}</p>` : ""}

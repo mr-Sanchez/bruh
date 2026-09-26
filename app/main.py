@@ -173,7 +173,7 @@ def self_test() -> int:
             messages = _FakeSetMessages()
 
         generator = ExerciseSetGenerator("selftest-key", client_factory=lambda key: _FakeSetClient())
-        topic = {"key": "articles", "label": "Articles", "description": ""}
+        topic = {"key": "articles_basic", "label": "Articles", "description": ""}
         assert len(generator.generate(topic, []).exercises) == 1
         answer = TranslationAnswer("ex1", "тест", "test", "x", "a test")
         assert generator.grade(topic, [answer]).verdicts == {}

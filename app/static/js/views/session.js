@@ -44,6 +44,7 @@ Views.session = (() => {
             ${session.analysis ? "Анализировать повторно" : "Анализировать (Claude)"}
           </button>
         </div>
+        <div id="analyze-theme"></div>
         <div id="analysis-slot"></div>
       </div>`;
   }
@@ -74,6 +75,16 @@ Views.session = (() => {
           ${typed ? "Набрано текстом" : `Длительность: ${formatDuration(session.duration_seconds)}`} ·
           Статус: ${escapeHtml(session.status)}
         </p>
+        ${
+          session.lesson && session.lesson.task
+            ? `<div class="speaking-prompt">
+                 <div class="muted">Устное задание урока
+                   <a href="#/practice/${encodeURIComponent(session.lesson.id)}">«${escapeHtml(session.lesson.label)}»</a></div>
+                 <p class="speaking-question">${escapeHtml(session.lesson.task.question)}</p>
+                 ${session.lesson.task.use ? `<p class="muted">Используйте: ${escapeHtml(session.lesson.task.use)}</p>` : ""}
+               </div>`
+            : ""
+        }
         ${session.error_message ? `<p class="muted">${escapeHtml(session.error_message)}</p>` : ""}
         ${session.image_url ? `<img class="session-picture" src="${session.image_url}" alt="Картинка, которую вы описывали" />` : ""}
         ${session.audio_url ? `<audio controls src="${session.audio_url}" style="width:100%"></audio>` : ""}
@@ -84,13 +95,18 @@ Views.session = (() => {
     if (drill) return;
     const slot = container.querySelector("#analysis-slot");
     await renderAnalysis(slot, session.analysis);
+    const picker = await ThemePicker.mountForAnalysis(
+      container.querySelector("#analyze-theme"),
+      session.language
+    );
 
     const analyzeBtn = container.querySelector("#analyze-btn");
     analyzeBtn.addEventListener("click", async () => {
       analyzeBtn.disabled = true;
       analyzeBtn.textContent = "Анализируем...";
       try {
-        const result = await Api.analyzeSession(session.id, !!session.analysis);
+        const theme = picker ? picker.value() : null;
+        const result = await Api.analyzeSession(session.id, !!session.analysis, theme);
         session.analysis = result.analysis;
         await renderAnalysis(slot, result.analysis);
       } catch (err) {

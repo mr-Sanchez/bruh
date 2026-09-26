@@ -21,7 +21,7 @@ from app.analyzer import (  # noqa: E402
     PictureAnalysis,
     SpeechAnalysis,
 )
-from app.progress_store import TOPIC_TAXONOMY  # noqa: E402
+from app.curriculum import TOPIC_KEYS  # noqa: E402
 
 
 class FakeResponse:
@@ -56,7 +56,7 @@ def make_analyzer(response: Any = None, error: Exception | None = None):
         strengths=["Говорит длинными фразами без остановок."],
         issues=[
             {
-                "topic": "verb_tense",
+                "topic": "present_perfect",
                 "quote": "Yesterday I go to the store",
                 "explanation": "Нужно прошедшее время.",
                 "correction": "Yesterday I went to the store",
@@ -103,7 +103,7 @@ class ClaudeAnalyzerTests(unittest.TestCase):
 
         self.assertEqual(messages.captured["model"], config.ANALYSIS_MODEL)
         self.assertIn("Russian", messages.captured["system"])
-        for key in TOPIC_TAXONOMY:
+        for key in TOPIC_KEYS:
             self.assertIn(key, messages.captured["system"])
         self.assertEqual(messages.captured["output_format"], SpeechAnalysis)
         self.assertEqual(messages.captured["thinking"], {"type": "adaptive"})
@@ -138,7 +138,7 @@ class ClaudeAnalyzerTests(unittest.TestCase):
     def test_successful_analysis_returns_topic_counts(self) -> None:
         analyzer, _ = make_analyzer()
         result = analyzer.analyze("Yesterday I go to the store.", config.default_profile(), 5.0)
-        self.assertEqual(result.topic_counts, {"verb_tense": 1})
+        self.assertEqual(result.topic_counts, {"present_perfect": 1})
         self.assertEqual(len(result.issues), 1)
         self.assertEqual(result.request_id, "fake-request-id")
 

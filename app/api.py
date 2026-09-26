@@ -21,7 +21,7 @@ import logging
 import mimetypes
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -29,13 +29,17 @@ from pydantic import BaseModel, Field
 
 from app import (
     config,
+    curriculum,
     dictation,
     dictation_store,
     exercise_sets,
     learner_model,
     learner_store,
+    module_test,
     progress_store,
     speech_drills,
+    theme_store,
+    themes,
     utils,
 )
 from app.analyzer import (
@@ -47,6 +51,7 @@ from app.analyzer import (
 )
 from app.dictation_translation import LessonTranslator
 from app.exercise_sets import ExerciseSetGenerator, TranslationAnswer
+from app.theory import TheoryWriter, own_mistakes_from_items
 from app.transcriber import DeepgramTranscriber, TranscriptionError
 from app.utils import Session
 from app.youtube import (
@@ -66,6 +71,7 @@ AnalyzerFactory = Callable[[], ClaudeAnalyzer]
 GeneratorFactory = Callable[[], ExerciseSetGenerator]
 FetcherFactory = Callable[[], YouTubeFetcher]
 TranslatorFactory = Callable[[], LessonTranslator]
+TheoryWriterFactory = Callable[[], TheoryWriter]
 
 
 # ------------------------------------------------------------- dependencies
@@ -92,6 +98,13 @@ def get_generator_factory() -> GeneratorFactory:
     return factory
 
 
+def get_theory_writer_factory() -> TheoryWriterFactory:
+    def factory() -> TheoryWriter:
+        return TheoryWriter(config.get_anthropic_api_key())
+
+    return factory
+
+
 def get_fetcher_factory() -> FetcherFactory:
     """The YouTube import of a dictation lesson (yt-dlp; no API key needed)."""
 
@@ -111,6 +124,24 @@ def get_translator_factory() -> TranslatorFactory:
 
 
 # ------------------------------------------------------------------ helpers
+class ThemeChoice(BaseModel):
+    """The context («уклон») picked before a generation: a saved theme's key,
+    or a one-off typed label. Neither means the last one used."""
+
+    key: Optional[str] = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,39}$")
+    label: Optional[str] = Field(default=None, max_length=200)
+
+
+def _use_theme(choice: Optional[ThemeChoice]) -> Dict[str, Optional[str]]:
+    """Resolve a request's theme and make it the default for next time."""
+    try:
+        theme = theme_store.resolve(choice.key, choice.label) if choice else theme_store.resolve()
+    except theme_store.ThemeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    theme_store.remember(theme)
+    return theme
+
+
 def _session_directory(session_id: str) -> Path:
     # session_id comes straight from the URL - guard against path traversal
     # before it is joined onto a filesystem path.
@@ -149,7 +180,15 @@ def _session_summary(session: Session) -> Dict[str, Any]:
         "has_analysis": session.analysis_path.is_file(),
         "kind": session.kind,
         "input_mode": session.input_mode,
+        "lesson": _session_lesson(session),
     }
+
+
+def _session_lesson(session: Session) -> Optional[Dict[str, Any]]:
+    """A lesson's spoken task as the screens show it: the lesson's label too."""
+    if not session.lesson:
+        return None
+    return {**session.lesson, "label": curriculum.topic_label(session.lesson.get("id"))}
 
 
 def _has_image(session: Session) -> bool:
@@ -213,22 +252,33 @@ def _transcribe_session(
 
 def _drill_meta(
     kind: str,
-    prompt_index: Optional[int],
+    prompt_id: Optional[str],
     series: Optional[str],
     source_session_id: Optional[str],
     passage: Optional[int],
 ) -> Dict[str, Any]:
     """What a drill take practises, checked before anything is saved."""
     if kind == config.KIND_TALK:
-        if prompt_index is None or not 0 <= prompt_index < len(config.SPEAKING_PROMPTS):
-            raise HTTPException(status_code=400, detail="Unknown speaking prompt.")
         if series is None:
-            return {"prompt_index": prompt_index, "series": None, "round": 1}
+            # The prompt is stored as shown: own themes' prompts can be deleted.
+            prompt = theme_store.resolve_prompt(prompt_id or "")
+            if prompt is None:
+                raise HTTPException(status_code=400, detail="Unknown speaking prompt.")
+            theme_store.remember(prompt["theme"])
+            return {
+                "prompt_id": prompt["id"],
+                "question": prompt["question"],
+                "hint": prompt["hint"],
+                "theme": prompt["theme"],
+                "series": None,
+                "round": 1,
+            }
         first = _load_session_or_404(series)
         if first.kind != config.KIND_TALK or (first.drill or {}).get("series") != first.id:
             raise HTTPException(status_code=400, detail="Not the first take of a talk series.")
+        shown = first.drill or {}
         return {
-            "prompt_index": (first.drill or {}).get("prompt_index", prompt_index),
+            **{key: shown.get(key) for key in ("prompt_id", "question", "hint", "theme")},
             "series": first.id,
             "round": learner_store.talk_round(first.id),
         }
@@ -254,10 +304,6 @@ def get_config() -> Dict[str, Any]:
         "default_language": config.default_profile().key,
         "deepgram_configured": config.get_api_key() is not None,
         "anthropic_configured": config.get_anthropic_api_key() is not None,
-        "speaking_prompts": [
-            {"index": index, "question": question, "hint": hint}
-            for index, (question, hint) in enumerate(config.SPEAKING_PROMPTS)
-        ],
         "image_max_side": config.IMAGE_MAX_SIDE_PX,
         "talk_seconds": config.TALK_SECONDS,
         "talk_rounds": config.TALK_ROUNDS,
@@ -275,16 +321,19 @@ async def create_session(
     language: str = Form(config.DEFAULT_LANGUAGE_KEY),
     client_duration_seconds: float = Form(0.0),
     mime_type: str = Form(""),
-    prompt_index: Optional[int] = Form(None),
+    prompt_id: Optional[str] = Form(None, max_length=80),
     series: Optional[str] = Form(None),
     source_session_id: Optional[str] = Form(None),
     passage: Optional[int] = Form(None),
+    lesson_id: Optional[str] = Form(None, max_length=40),
+    task_id: Optional[str] = Form(None, max_length=10),
     transcriber_factory: TranscriberFactory = Depends(get_transcriber_factory),
 ) -> Dict[str, Any]:
     """A new take: an audio `file` (transcribed in the background) or a typed
     `text` (done at once). A picture description also carries its `image`;
-    a «60 секунд» take its `prompt_index` and, from round 2 on, its `series`;
-    a shadowing take the `source_session_id` and `passage` it reads."""
+    a «60 секунд» take its `prompt_id` and, from round 2 on, its `series`;
+    a shadowing take the `source_session_id` and `passage` it reads; a
+    lesson's spoken task (a monologue) its `lesson_id` and `task_id`."""
     profile = config.profile_by_key(language)
     if kind not in config.SESSION_KINDS:
         raise HTTPException(status_code=400, detail="Unknown activity kind.")
@@ -294,7 +343,7 @@ async def create_session(
     if kind in config.DRILL_KINDS:
         if file is None:
             raise HTTPException(status_code=400, detail="A spoken drill needs a recording.")
-        drill = _drill_meta(kind, prompt_index, series, source_session_id, passage)
+        drill = _drill_meta(kind, prompt_id, series, source_session_id, passage)
         if kind == config.KIND_SHADOWING:
             # The passage is English whatever the source recording's language.
             profile = config.profile_by_key(config.DEFAULT_LANGUAGE_KEY)
@@ -303,6 +352,21 @@ async def create_session(
             raise HTTPException(status_code=400, detail="The text is empty.")
         if len(text) > config.TYPED_TEXT_MAX_CHARS:
             raise HTTPException(status_code=400, detail="The text is too long.")
+    lesson: Optional[Dict[str, Any]] = None
+    if lesson_id is not None or task_id is not None:
+        if kind != config.KIND_MONOLOGUE:
+            raise HTTPException(status_code=400, detail="Only a monologue can be a lesson task.")
+        task = (
+            learner_store.lesson_task(lesson_id, task_id or "")
+            if lesson_id in curriculum.MODULE_OF_LESSON
+            else None
+        )
+        if task is None:
+            raise HTTPException(status_code=404, detail="Unknown lesson task.")
+        lesson = {
+            "id": lesson_id,
+            "task": {key: task.get(key) for key in ("id", "question", "hint", "use", "theme")},
+        }
     image_upload = None
     if kind == config.KIND_PICTURE:
         image_upload = await _read_image_upload(image)
@@ -321,6 +385,7 @@ async def create_session(
     session.kind = kind
     session.language_key = profile.key
     session.drill = drill
+    session.lesson = lesson
     if drill is not None and kind == config.KIND_TALK and drill["series"] is None:
         # Round 1 of a talk starts its own series, named after itself.
         session.drill = {**drill, "series": session.id}
@@ -384,6 +449,7 @@ def get_session(session_id: str) -> Dict[str, Any]:
         "image_url": f"/api/sessions/{session.id}/image" if _has_image(session) else None,
         "analysis": _read_analysis(session),
         "drill": session.drill,
+        "lesson": _session_lesson(session),
         "speech": (
             learner_store.speech_report(session)
             if session.status == utils.STATUS_DONE
@@ -412,6 +478,8 @@ def get_session_image(session_id: str) -> FileResponse:
 
 class AnalyzeRequest(BaseModel):
     force: bool = False
+    # The context of the practice sentences (drills) the analysis writes.
+    theme: Optional[ThemeChoice] = None
 
 
 @router.post("/sessions/{session_id}/analyze")
@@ -441,12 +509,31 @@ def analyze_session(
             raise HTTPException(status_code=400, detail="The session's picture is unreadable.")
         image = ImageInput(data=image_bytes, media_type=media_type)
     typed = session.input_mode == config.INPUT_TEXT
+    theme = _use_theme(body.theme)
+    # A lesson's spoken task (R6): the lesson's rule is checked in focus.
+    lesson_focus = None
+    if session.lesson and session.lesson.get("id") in curriculum.MODULE_OF_LESSON:
+        info = curriculum.topic_info(session.lesson["id"])
+        task = session.lesson.get("task") or {}
+        lesson_focus = {
+            "key": info["key"],
+            "label": info["label"],
+            "description": info["description"],
+            "task": task.get("question", ""),
+            "use": task.get("use", ""),
+        }
 
     analyzer = analyzer_factory()
     profile = config.profile_by_key(session.language_key)
     try:
         result = analyzer.analyze(
-            session.transcript, profile, session.duration_seconds, image=image, typed=typed
+            session.transcript,
+            profile,
+            session.duration_seconds,
+            image=image,
+            typed=typed,
+            theme=theme,
+            lesson=lesson_focus,
         )
     except MissingAnthropicApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -468,6 +555,7 @@ def analyze_session(
         "language": session.language_key,
         "kind": session.kind,
         "input_mode": session.input_mode,
+        "theme": theme,
         "summary": result.summary,
         "strengths": result.strengths,
         "issues": [issue.model_dump() for issue in result.issues],
@@ -484,12 +572,19 @@ def analyze_session(
             if picture
             else {}
         ),
+        **(
+            {"lesson": {**session.lesson, "check": result.lesson_check}}
+            if lesson_focus is not None
+            else {}
+        ),
         "topic_counts": result.topic_counts,
         "request_id": result.request_id,
         "usage": {**result.usage, "cost_usd": usage_record["cost_usd"]},
     }
     utils.write_json(session.analysis_path, analysis_payload)
     learner_store.refresh_after_analysis()
+    if lesson_focus is not None:
+        learner_store.record_lesson_task(session, result.lesson_check)
 
     return {"session_id": session.id, "analysis": analysis_payload, "progress_updated": True}
 
@@ -509,20 +604,387 @@ def get_progress() -> Dict[str, Any]:
 
 @router.get("/topics")
 def get_topics() -> Dict[str, Any]:
+    catalogue = curriculum.catalogue()
+    return {"areas": catalogue["areas"], "topics": catalogue["topics"]}
+
+
+@router.get("/curriculum")
+def get_curriculum() -> Dict[str, Any]:
+    """The fixed course: areas, topics and levels -> modules -> lessons."""
+    return curriculum.catalogue()
+
+
+# --------------------------------------------------------------- /roadmap
+@router.get("/roadmap")
+def get_roadmap() -> Dict[str, Any]:
+    """The course with every lesson's status and the lesson to continue with."""
+    return learner_store.roadmap_view()
+
+
+class RoadmapMarkRequest(BaseModel):
+    """«Пропустить» / «Уже знаю»; null clears the lesson's mark."""
+
+    mark: Optional[Literal["skipped", "known"]] = None
+
+
+@router.get("/roadmap/lessons/{lesson_id}")
+def get_roadmap_lesson(lesson_id: str) -> Dict[str, Any]:
+    """One lesson's status for its page: runs, passing days, mark."""
+    row = learner_store.roadmap_lesson(lesson_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown lesson.")
+    return row
+
+
+@router.post("/roadmap/lessons/{lesson_id}/mark")
+def post_roadmap_mark(lesson_id: str, body: RoadmapMarkRequest) -> Dict[str, Any]:
+    if lesson_id not in curriculum.MODULE_OF_LESSON:
+        raise HTTPException(status_code=404, detail="Unknown lesson.")
+    learner_store.append_roadmap_mark(lesson_id, body.mark)
+    return learner_store.roadmap_view()
+
+
+# --------------------------------------------------------- lesson theory
+def _roadmap_lesson_or_404(lesson_id: str) -> str:
+    if lesson_id not in curriculum.MODULE_OF_LESSON:
+        raise HTTPException(status_code=404, detail="Unknown lesson.")
+    return lesson_id
+
+
+def _theory_payload(lesson_id: str, version: Optional[int] = None) -> Dict[str, Any]:
+    """A lesson's theory: the chosen version (the latest by default) and the
+    list of all versions, plus what a new one costs."""
+    data = learner_store.load_theory(lesson_id) or {"versions": []}
+    versions = data["versions"]
+    if version is not None and not 0 <= version < len(versions):
+        raise HTTPException(status_code=404, detail="No such theory version.")
+    index = len(versions) - 1 if version is None else version
+    chosen = versions[index] if versions else None
     return {
-        "topics": [
+        "lesson": curriculum.topic_info(lesson_id),
+        "versions": [
             {
-                "key": key,
-                "label": info["label"],
-                "description": info["description"],
-                "resources": [
-                    {"title": title, "url": url}
-                    for title, url in config.TOPIC_RESOURCES.get(key, ())
-                ],
+                "index": number,
+                "created_at": v.get("created_at"),
+                "cost_usd": (v.get("usage") or {}).get("cost_usd"),
             }
-            for key, info in progress_store.TOPIC_TAXONOMY.items()
-        ]
+            for number, v in enumerate(versions)
+        ],
+        "version": index if chosen else None,
+        "theory": chosen.get("content") if chosen else None,
+        "cost_estimate_usd": learner_store.theory_cost_estimate(),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
     }
+
+
+@router.get("/lessons/{lesson_id}/theory")
+def get_lesson_theory(lesson_id: str, version: Optional[int] = None) -> Dict[str, Any]:
+    return _theory_payload(_roadmap_lesson_or_404(lesson_id), version)
+
+
+@router.post("/lessons/{lesson_id}/theory", status_code=201)
+def post_lesson_theory(
+    lesson_id: str,
+    writer_factory: TheoryWriterFactory = Depends(get_theory_writer_factory),
+) -> Dict[str, Any]:
+    """Claude writes the lesson's theory (a paid click). A second click
+    writes a new version; the earlier ones are kept and can be reopened."""
+    _roadmap_lesson_or_404(lesson_id)
+    topic = curriculum.topic_info(lesson_id)
+    own = own_mistakes_from_items(learner_store.theory_own_mistakes(lesson_id))
+    try:
+        result = writer_factory().write(topic, topic["level"], own)
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    usage = learner_store.record_claude_usage("theory", result.call.model, result.call.usage)
+    learner_store.add_theory_version(
+        lesson_id,
+        {
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "model": result.call.model,
+            "effort": result.call.effort,
+            "request_id": result.call.request_id,
+            "usage": {**result.call.usage, "cost_usd": usage["cost_usd"]},
+            "own_mistakes": own,
+            "content": result.content,
+        },
+    )
+    return _theory_payload(lesson_id)
+
+
+# ----------------------------------------------------- module entry test
+def _module_or_404(key: str) -> curriculum.Module:
+    module = curriculum.MODULE_BY_KEY.get(key)
+    if module is None:
+        raise HTTPException(status_code=404, detail="Unknown module.")
+    return module
+
+
+def _module_test_payload(
+    module: curriculum.Module, test_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """The module, its lessons with their status, every test (summaries) and
+    one test to take - without its answers - with its latest run, if any."""
+    tests = learner_store.load_module_tests(module.key)
+    chosen = next((t for t in tests if t["id"] == test_id), None) if test_id else None
+    if test_id and chosen is None:
+        raise HTTPException(status_code=404, detail="Unknown test.")
+    chosen = chosen or (tests[-1] if tests else None)
+    statuses = {
+        row["id"]: row["status"]
+        for level in learner_store.roadmap_view()["levels"]
+        for m in level["modules"]
+        if m["key"] == module.key
+        for row in m["lessons"]
+    }
+    return {
+        "module": {
+            "key": module.key,
+            "title": module.title,
+            "level": curriculum.LEVEL_BY_KEY[module.level].label,
+        },
+        "lessons": [
+            {**curriculum.topic_info(lesson), "status": statuses.get(lesson)}
+            for lesson in module.lessons
+        ],
+        "tests": [
+            {
+                "id": t["id"],
+                "created_at": t.get("created_at"),
+                "runs": len(t.get("runs") or []),
+                "best_score": max((r.get("score", 0) for r in t.get("runs") or []), default=None),
+            }
+            for t in tests
+        ],
+        "test": (
+            {
+                "id": chosen["id"],
+                "created_at": chosen.get("created_at"),
+                "questions": [module_test.public(q) for q in chosen["questions"]],
+                "last_run": (chosen.get("runs") or [None])[-1],
+            }
+            if chosen
+            else None
+        ),
+        "cost_estimate_usd": learner_store.module_test_cost_estimate(),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+@router.get("/modules/{module_key}/test")
+def get_module_test(module_key: str, test: Optional[str] = None) -> Dict[str, Any]:
+    return _module_test_payload(_module_or_404(module_key), test)
+
+
+@router.post("/modules/{module_key}/test", status_code=201)
+def post_module_test(
+    module_key: str, generator_factory: GeneratorFactory = Depends(get_generator_factory)
+) -> Dict[str, Any]:
+    """Claude writes a new entry test for the module (a paid click); earlier
+    tests stay and can be retaken for free, and are not repeated."""
+    module = _module_or_404(module_key)
+    lessons = list(module.lessons)
+    avoid = [
+        module_test.sentence(q)
+        for t in learner_store.load_module_tests(module.key)
+        for q in t["questions"]
+    ]
+    try:
+        result = generator_factory().write_module_test(
+            module.title, [curriculum.topic_info(lesson) for lesson in lessons], avoid
+        )
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    usage = learner_store.record_claude_usage("module_test", result.call.model, result.call.usage)
+    questions = module_test.assemble(result.test, lessons)
+    if not module_test.complete_enough(questions, lessons):
+        raise HTTPException(
+            status_code=502, detail="Claude составил неполный тест. Попробуйте ещё раз."
+        )
+    test = learner_store.add_module_test(
+        module.key,
+        questions,
+        {
+            "model": result.call.model,
+            "effort": result.call.effort,
+            "request_id": result.call.request_id,
+            "usage": {**result.call.usage, "cost_usd": usage["cost_usd"]},
+        },
+    )
+    return _module_test_payload(module, test["id"])
+
+
+class ModuleTestAnswers(BaseModel):
+    """Answers by question id: a choice's option index as text, a gap's word."""
+
+    answers: Dict[str, str] = Field(default_factory=dict, max_length=60)
+
+
+@router.post("/modules/{module_key}/test/{test_id}/submit")
+def submit_module_test(module_key: str, test_id: str, body: ModuleTestAnswers) -> Dict[str, Any]:
+    """Grade a run on the server, keep it, and log one attempt per lesson."""
+    module = _module_or_404(module_key)
+    tests = learner_store.load_module_tests(module.key)
+    test = next((t for t in tests if t["id"] == test_id), None)
+    if test is None:
+        raise HTTPException(status_code=404, detail="Unknown test.")
+    answers = {key: value[:200] for key, value in body.answers.items()}
+    graded = module_test.grade(test["questions"], answers)
+    learner_store.record_module_test_run(module.key, test_id, answers, graded)
+    return _module_test_payload(module, test_id)
+
+
+class MarkKnownRequest(BaseModel):
+    lessons: List[str] = Field(min_length=1, max_length=20)
+
+
+@router.post("/modules/{module_key}/mark-known")
+def mark_module_lessons_known(module_key: str, body: MarkKnownRequest) -> Dict[str, Any]:
+    """After a test: mark the lessons the learner passed «уже знаю» at once."""
+    module = _module_or_404(module_key)
+    if not set(body.lessons) <= set(module.lessons):
+        raise HTTPException(status_code=400, detail="A lesson is not in this module.")
+    for lesson in dict.fromkeys(body.lessons):
+        learner_store.append_roadmap_mark(lesson, "known")
+    return _module_test_payload(module)
+
+
+# --------------------------------------------------- lesson spoken task
+def _tasks_payload(lesson_id: str) -> Dict[str, Any]:
+    return {
+        "lesson": curriculum.topic_info(lesson_id),
+        "tasks": [
+            {key: task.get(key) for key in ("id", "question", "hint", "use", "theme")}
+            for task in learner_store.load_lesson_tasks(lesson_id)
+        ],
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+@router.get("/lessons/{lesson_id}/tasks")
+def get_lesson_tasks(lesson_id: str) -> Dict[str, Any]:
+    """Every spoken task written for the lesson; the page shows the chosen context's."""
+    return _tasks_payload(_roadmap_lesson_or_404(lesson_id))
+
+
+class LessonTasksRequest(BaseModel):
+    theme: Optional[ThemeChoice] = None
+
+
+@router.post("/lessons/{lesson_id}/tasks", status_code=201)
+def post_lesson_tasks(
+    lesson_id: str,
+    body: LessonTasksRequest = LessonTasksRequest(),
+    generator_factory: GeneratorFactory = Depends(get_generator_factory),
+) -> Dict[str, Any]:
+    """Claude (Haiku) writes a few spoken tasks for the lesson in the chosen
+    context - a click, ~0.1 cent; they are kept and added to the list."""
+    _roadmap_lesson_or_404(lesson_id)
+    topic = curriculum.topic_info(lesson_id)
+    theme = _use_theme(body.theme)
+    try:
+        result = generator_factory().write_lesson_tasks(topic, topic["level"], theme)
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    usage = learner_store.record_claude_usage("lesson_tasks", result.call.model, result.call.usage)
+    added = learner_store.add_lesson_tasks(
+        lesson_id, theme, result.prompts, model=result.call.model, cost_usd=usage["cost_usd"]
+    )
+    return {**_tasks_payload(lesson_id), "added": [t["id"] for t in added]}
+
+
+# ---------------------------------------------------------------- /themes
+# Contexts («уклон», Stage 8 R3): built-in ones with hand-written speaking
+# prompts, the learner's own ones (saved), and the last one used as default.
+def _themes_payload() -> Dict[str, Any]:
+    return {
+        **theme_store.overview(),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+@router.get("/themes")
+def get_themes() -> Dict[str, Any]:
+    return _themes_payload()
+
+
+class NewThemeRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=200)
+
+
+@router.post("/themes", status_code=201)
+def post_theme(body: NewThemeRequest) -> Dict[str, Any]:
+    """Save an own context; it becomes the default right away."""
+    try:
+        theme = theme_store.add_custom(body.label)
+    except theme_store.ThemeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    theme_store.remember(theme)
+    return {"theme": theme, **_themes_payload()}
+
+
+@router.delete("/themes/{key}")
+def delete_theme(key: str) -> Dict[str, Any]:
+    if themes.is_builtin(key) or not theme_store.delete_custom(key):
+        raise HTTPException(status_code=404, detail="Unknown own context.")
+    return _themes_payload()
+
+
+@router.put("/themes/last")
+def put_last_theme(body: ThemeChoice) -> Dict[str, Any]:
+    """A picker's choice made without a generation (speaking prompts)."""
+    return {"theme": _use_theme(body), **_themes_payload()}
+
+
+def _prompts_payload(key: str) -> Dict[str, Any]:
+    try:
+        theme = theme_store.resolve(key)
+    except theme_store.ThemeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "theme": theme,
+        "prompts": theme_store.prompts_for(key),
+        # Only own contexts have prompts written by Claude.
+        "can_generate": not themes.is_builtin(key),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+@router.get("/themes/{key}/prompts")
+def get_theme_prompts(key: str) -> Dict[str, Any]:
+    return _prompts_payload(key)
+
+
+@router.post("/themes/{key}/prompts")
+def post_theme_prompts(
+    key: str, generator_factory: GeneratorFactory = Depends(get_generator_factory)
+) -> Dict[str, Any]:
+    """Claude (Haiku) writes speaking prompts for an own context - a click,
+    ~0.1 cent, stored; clicking again writes a fresh list."""
+    payload = _prompts_payload(key)
+    if not payload["can_generate"]:
+        raise HTTPException(status_code=400, detail="Built-in contexts have their own prompts.")
+    try:
+        result = generator_factory().write_speaking_prompts(payload["theme"]["label"])
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    usage = learner_store.record_claude_usage("theme_prompts", result.call.model, result.call.usage)
+    try:
+        theme_store.store_prompts(
+            key, result.prompts, model=result.call.model, cost_usd=usage["cost_usd"]
+        )
+    except theme_store.ThemeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    theme_store.remember(payload["theme"])
+    return {**_prompts_payload(key), "cost_usd": usage["cost_usd"]}
 
 
 # ---------------------------------------------------------------- /learner
@@ -581,7 +1043,7 @@ def post_learner_attempt(body: AttemptRequest) -> Dict[str, Any]:
     if (body.item_id is None) == (body.topic is None):
         raise HTTPException(status_code=400, detail="Give exactly one of item_id or topic.")
     if body.topic is not None:
-        if body.topic not in progress_store.TOPIC_TAXONOMY:
+        if not curriculum.is_topic(body.topic):
             raise HTTPException(status_code=404, detail="Unknown topic.")
         if body.score is None:
             raise HTTPException(status_code=400, detail="A topic drill needs a score.")
@@ -625,7 +1087,7 @@ def check_card(
     body: CardCheckRequest,
     generator_factory: GeneratorFactory = Depends(get_generator_factory),
 ) -> Dict[str, Any]:
-    """Check a translation card's answer: Claude (Haiku) decides whether it
+    """Check a translation card's answer: Claude (GRADING_MODEL) decides whether it
     says the sentence correctly with the construction the card trains.
 
     Only the check - the attempt is logged by POST /learner/attempts as for
@@ -689,7 +1151,8 @@ def get_learner_history() -> Dict[str, Any]:
 
 @router.get("/learner/topics")
 def get_learner_topics() -> Dict[str, Any]:
-    return {"topics": learner_store.topic_mastery()}
+    topics = learner_store.topic_mastery()
+    return {"topics": topics, "areas": learner_store.area_mastery(topics)}
 
 
 @router.get("/usage")
@@ -708,10 +1171,10 @@ def get_shadowing_passages() -> Dict[str, Any]:
 @router.get("/speech/talks")
 def get_talk_series() -> Dict[str, Any]:
     """«60 секунд» series with every round's measurements, newest first."""
-    today = dt.date.today()
     return {
         "series": learner_store.talk_series(),
-        "prompt_index": speech_drills.talk_prompt_index(today),
+        # Half a list away from the day's monologue prompt.
+        "prompt": theme_store.prompt_of_day(dt.date.today(), offset=1),
     }
 
 
@@ -975,7 +1438,7 @@ def _set_or_404(set_id: str) -> Dict[str, Any]:
 
 
 def _check_set_topic(topic: str) -> None:
-    if topic not in progress_store.TOPIC_TAXONOMY:
+    if not curriculum.is_topic(topic):
         raise HTTPException(status_code=404, detail="Unknown topic.")
     if not learner_model.set_topic_allowed(topic):
         raise HTTPException(
@@ -994,6 +1457,7 @@ def _set_payload(exercise_set: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
 class CreateSetRequest(BaseModel):
     topic: str = Field(pattern=_SLUG_PATTERN)
     force: bool = False
+    theme: Optional[ThemeChoice] = None
 
 
 @router.get("/practice/sets")
@@ -1023,12 +1487,26 @@ def create_exercise_set(
             return _set_payload(waiting, reused=True)
 
     topic = learner_store.topic_info(body.topic)
+    theme = _use_theme(body.theme)
+    # A roadmap lesson's set (R5): its level and latest theory go along, so
+    # the set trains what the lesson taught. The lesson id is the topic key.
+    lesson = None
+    theory_version = None
+    if body.topic in curriculum.MODULE_OF_LESSON:
+        versions = (learner_store.load_theory(body.topic) or {}).get("versions") or []
+        theory_version = len(versions) - 1 if versions else None
+        lesson = {
+            "level": topic["level"],
+            "theory": versions[-1].get("content") if versions else None,
+        }
     generator = generator_factory()
     try:
         result = generator.generate(
             topic,
             learner_store.set_seeds(body.topic),
             learner_store.set_avoid_sentences(body.topic),
+            theme=theme,
+            lesson=lesson,
         )
     except MissingAnthropicApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1039,14 +1517,24 @@ def create_exercise_set(
     usage = learner_store.record_claude_usage(
         "exercise_set", result.call.model, result.call.usage, set_id=set_id
     )
+    exercises = exercise_sets.drop_repeats(
+        result.exercises, learner_store.set_sentences(body.topic)
+    )
+    if not exercises:
+        raise HTTPException(
+            status_code=502, detail="Claude повторил старые упражнения. Попробуйте ещё раз."
+        )
     exercise_set = {
         "schema_version": learner_store.SET_SCHEMA_VERSION,
         "id": set_id,
         "topic": body.topic,
         "language": "en",
         "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "theme": theme,
+        "lesson_id": body.topic if lesson is not None else None,
+        "theory_version": theory_version,
         "intro": result.intro,
-        "exercises": result.exercises,
+        "exercises": exercises,
         "generation": {
             "model": result.call.model,
             "effort": result.call.effort,

@@ -251,8 +251,8 @@ Views.talk = (() => {
       container.innerHTML = `<div class="card"><p class="muted">Не удалось загрузить: ${escapeHtml(err.message)}</p></div>`;
       return;
     }
-    const prompts = cfg.speaking_prompts;
-    let shown = /^\d+$/.test(param || "") ? Number(param) % prompts.length : talks.prompt_index;
+    // #/talk/<prompt id> from «Сегодня»; a plain #/talk opens the day's prompt.
+    const promptId = param ? decodeURIComponent(param) : talks.prompt.id;
     const rounds = cfg.talk_rounds;
     const takes = [];
     let series = null;
@@ -272,46 +272,36 @@ Views.talk = (() => {
       <div id="takes"></div>`;
 
     const slot = container.querySelector("#prompt-slot");
-    const showPrompt = () => {
-      const prompt = prompts[shown];
-      slot.innerHTML = `
-        <div class="speaking-prompt">
-          <div class="muted">Тема: ${escapeHtml(prompt.hint)}</div>
-          <p class="speaking-question">${escapeHtml(prompt.question)}</p>
-          ${takes.length ? "" : `<button type="button" class="secondary" id="next-prompt">Другая тема</button>`}
-        </div>`;
-      const next = slot.querySelector("#next-prompt");
-      if (next) {
-        next.addEventListener("click", () => {
-          shown = (shown + 1) % prompts.length;
-          showPrompt();
-        });
-      }
-    };
-    showPrompt();
+    let prompts = null;
+    try {
+      prompts = await ThemePicker.mountPrompts(slot, { promptId });
+    } catch (err) {
+      slot.innerHTML = `<p class="muted">Темы не загрузились: ${escapeHtml(err.message)}</p>`;
+    }
 
     const takesHost = container.querySelector("#takes");
     controls = Speech.wireRecorder(container, {
       maxSeconds: cfg.talk_seconds,
       countdown: true,
+      // The series keeps its prompt: no switching once the first take starts.
       onStart: () => {
-        const next = slot.querySelector("#next-prompt");
-        if (next) next.remove();
+        if (prompts) prompts.lock();
       },
       upload: async (blob, seconds) => {
+        const prompt = prompts && prompts.current();
+        if (!prompt && !series) throw new Error("Сначала выберите тему для рассказа.");
         const result = await Api.uploadSession(blob, {
           language: "en-US",
           durationSeconds: seconds,
           mimeType: blob.type,
           kind: "talk",
-          drill: { prompt_index: shown, series },
+          drill: { prompt_id: prompt ? prompt.id : null, series },
         });
         if (!series) series = result.session_id;
         return result;
       },
       onDone: (session) => {
         takes.push(session);
-        showPrompt();
         takesHost.innerHTML = renderTakes(takes, rounds);
         if (takes.length >= rounds) {
           controls.setStartLabel("Ещё попытка");

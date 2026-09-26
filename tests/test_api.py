@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import api, config, learner_store  # noqa: E402
+from app import api, config, learner_store, themes  # noqa: E402
 from app.analyzer import (  # noqa: E402
     ANALYSIS_SCHEMA_VERSION,
     AnalysisResult,
@@ -38,6 +38,8 @@ from app.exercise_sets import (  # noqa: E402
     ClaudeCall,
     GenerationResult,
     GradingResult,
+    ModuleTestResult,
+    PromptsResult,
     TranslationAnswer,
 )
 from app.server import app as fastapi_app  # noqa: E402
@@ -81,7 +83,7 @@ class FakeAnalyzer:
         self.last_kwargs = kwargs
         picture = kwargs.get("image") is not None
         issue = Issue(
-            topic="verb_tense",
+            topic="present_perfect",
             quote="I go",
             explanation="Нужно прошедшее время.",
             correction="I went",
@@ -99,7 +101,7 @@ class FakeAnalyzer:
         return AnalysisResult(
             summary="Есть одна ошибка времени глагола.",
             issues=[issue],
-            topic_counts={"verb_tense": 1},
+            topic_counts={"present_perfect": 1},
             improved_version="Yesterday I went to the store.",
             scores=Scores(grammar=score, vocabulary=score, fluency=score, naturalness=score),
             overall_score=6.0,
@@ -116,6 +118,11 @@ class FakeAnalyzer:
             model=config.ANALYSIS_MODEL,
             effort="medium",
             request_id="fake-analysis-id",
+            lesson_check=(
+                {"score": 8, "verdict": "Хорошо.", "good_uses": ["I had left"], "missed": []}
+                if kwargs.get("lesson") is not None
+                else None
+            ),
             usage={
                 "input_tokens": 3_000,
                 "output_tokens": 5_000,
@@ -147,11 +154,23 @@ class FakeGenerator:
         self.graded: List[List[TranslationAnswer]] = []
         self.fail_grading: Optional[Exception] = None
 
-    def generate(self, topic, seeds, avoid=()) -> GenerationResult:
-        self.generated.append({"topic": topic, "seeds": list(seeds), "avoid": list(avoid)})
+    def generate(self, topic, seeds, avoid=(), theme=None, lesson=None) -> GenerationResult:
+        self.generated.append(
+            {"topic": topic, "seeds": list(seeds), "avoid": list(avoid), "theme": theme,
+             "lesson": lesson}
+        )
+        # Every later set gets new sentences, as the prompt asks: repeats are dropped.
+        suffix = "" if len(self.generated) == 1 else f" ({len(self.generated)})"
+        exercises = []
+        for exercise in SET_EXERCISES:
+            exercise = dict(exercise)
+            for field in ("russian", "sentence", "after"):
+                if field in exercise:
+                    exercise[field] += suffix
+            exercises.append(exercise)
         return GenerationResult(
             intro="Прошедшее время.",
-            exercises=[dict(e) for e in SET_EXERCISES],
+            exercises=exercises,
             call=ClaudeCall(
                 model=config.EXERCISE_SET_MODEL,
                 usage={"input_tokens": 2_000, "output_tokens": 2_000},
@@ -169,11 +188,51 @@ class FakeGenerator:
                 "correct": "have" in a.answer,
                 "comment": "Коммент.",
                 "corrected": a.reference,
+                "topic": "sentence_structure",
             }
             for a in answers
         }
         usage = {"input_tokens": 1_000, "output_tokens": 500}
         return GradingResult(verdicts=verdicts, call=ClaudeCall(config.GRADING_MODEL, usage))
+
+    def write_module_test(self, module_title, lessons, avoid=()) -> ModuleTestResult:
+        """One choice (right answer: option 1) and one gap ("done") per lesson."""
+        self.module_tests = getattr(self, "module_tests", []) + [
+            {"title": module_title, "lessons": [l["key"] for l in lessons], "avoid": list(avoid)}
+        ]
+        n = len(self.module_tests)
+        test = {
+            "choices": [
+                {"lesson": l["key"], "question": f"{l['key']} choice {n} ___.",
+                 "options": ["a", "b", "c", "d"], "correct": 1, "explanation": "Потому что."}
+                for l in lessons
+            ],
+            "gaps": [
+                {"lesson": l["key"], "sentence": f"{l['key']} gap {n} ___ here.",
+                 "answers": ["done"], "hint": "", "explanation": "Так."}
+                for l in lessons
+            ],
+        }
+        usage = {"input_tokens": 1_500, "output_tokens": 2_500}
+        return ModuleTestResult(test=test, call=ClaudeCall(config.MODULE_TEST_MODEL, usage))
+
+    def write_lesson_tasks(self, topic, level, theme=None) -> PromptsResult:
+        self.task_requests = getattr(self, "task_requests", []) + [
+            {"topic": topic["key"], "level": level, "theme": theme}
+        ]
+        n = len(self.task_requests)
+        tasks = [
+            {"question": f"Task {n}.{i}?", "hint": f"Задание {n}.{i}", "use": "Используйте X."}
+            for i in (1, 2, 3)
+        ]
+        usage = {"input_tokens": 300, "output_tokens": 500}
+        return PromptsResult(prompts=tasks, call=ClaudeCall(config.LESSON_TASK_MODEL, usage))
+
+    def write_speaking_prompts(self, theme_label) -> PromptsResult:
+        self.prompt_labels = getattr(self, "prompt_labels", []) + [theme_label]
+        prompts = [{"question": f"About {theme_label} {n}?", "hint": f"Тема {n}"} for n in (1, 2)]
+        usage = {"input_tokens": 300, "output_tokens": 400}
+        return PromptsResult(prompts=prompts, call=ClaudeCall(config.THEME_PROMPTS_MODEL, usage))
 
 
 class ApiTests(unittest.TestCase):
@@ -225,13 +284,17 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(keys, {"en-US", "ru", "multi"})
 
     def test_topics_endpoint_lists_the_full_taxonomy(self) -> None:
-        from app.progress_store import TOPIC_TAXONOMY
+        from app.curriculum import AREAS, TOPIC_KEYS
 
         response = self.client.get("/api/topics")
         self.assertEqual(response.status_code, 200)
         topics = {t["key"]: t for t in response.json()["topics"]}
-        self.assertEqual(set(topics), set(TOPIC_TAXONOMY.keys()))
-        self.assertTrue(topics["articles"]["resources"][0]["url"].startswith("https://"))
+        self.assertEqual(set(topics), set(TOPIC_KEYS))
+        self.assertEqual(len(response.json()["areas"]), len(AREAS))
+        self.assertEqual(topics["present_perfect"]["area"], "tenses")
+        self.assertEqual(topics["present_perfect"]["level"], "b1")
+        self.assertIsNone(topics["filler_words_fluency"]["level"])
+        self.assertTrue(topics["articles_basic"]["resources"][0]["url"].startswith("https://"))
         self.assertEqual(topics["other"]["resources"], [])
 
     def test_upload_transcribes_synchronously_within_the_test_client_call(self) -> None:
@@ -371,7 +434,7 @@ class ApiTests(unittest.TestCase):
 
         progress = self.client.get("/api/progress").json()
         topic_keys = {t["key"] for t in progress["topics"]}
-        self.assertIn("verb_tense", topic_keys)
+        self.assertIn("present_perfect", topic_keys)
 
     def test_analyze_is_idempotent_without_force(self) -> None:
         upload = self._upload_session()
@@ -433,7 +496,7 @@ class ApiTests(unittest.TestCase):
         session_id = self._analyzed_session()
         self.client.post(f"/api/sessions/{session_id}/analyze", json={"force": True})
         progress = self.client.get("/api/progress").json()
-        verb_tense = next(t for t in progress["topics"] if t["key"] == "verb_tense")
+        verb_tense = next(t for t in progress["topics"] if t["key"] == "present_perfect")
         self.assertEqual(verb_tense["count"], 1)
         self.assertEqual(len(progress["score_history"]), 1)
 
@@ -491,7 +554,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(no_correct.status_code, 400)
         both = self.client.post(
             "/api/learner/attempts",
-            json={"item_id": item_id, "topic": "articles", "exercise": "x", "correct": True},
+            json={"item_id": item_id, "topic": "articles_basic", "exercise": "x", "correct": True},
         )
         self.assertEqual(both.status_code, 400)
 
@@ -532,7 +595,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/learner/items").json()["count"], 0)
         self.assertEqual(self.client.get("/api/learner/queue").json()["new"], [])
         topics = self.client.get("/api/learner/topics").json()["topics"]
-        self.assertEqual(next(t for t in topics if t["key"] == "verb_tense")["items"], 0)
+        self.assertEqual(next(t for t in topics if t["key"] == "present_perfect")["items"], 0)
         # The bank still has it, so earlier attempts keep their topic.
         self.assertEqual(len(learner_store.load_item_bank()["items"]), 1)
 
@@ -586,27 +649,27 @@ class ApiTests(unittest.TestCase):
 
     def test_topic_drill_attempt_derives_correct_from_its_score(self) -> None:
         passed = self.client.post(
-            "/api/learner/attempts", json={"topic": "articles", "exercise": "ai_set", "score": 0.9}
+            "/api/learner/attempts", json={"topic": "articles_basic", "exercise": "ai_set", "score": 0.9}
         )
         self.assertEqual(passed.status_code, 201, passed.text)
         self.assertTrue(passed.json()["attempt"]["correct"])
         failed = self.client.post(
             "/api/learner/attempts",
-            json={"topic": "articles", "exercise": "ai_set", "score": 0.5, "correct": True},
+            json={"topic": "articles_basic", "exercise": "ai_set", "score": 0.5, "correct": True},
         )
         self.assertFalse(failed.json()["attempt"]["correct"])  # derived from the score
         articles = next(
             t for t in self.client.get("/api/learner/topics").json()["topics"]
-            if t["key"] == "articles"
+            if t["key"] == "articles_basic"
         )
         self.assertAlmostEqual(articles["accuracy"], 0.7)
 
     def test_topic_drill_attempt_is_validated(self) -> None:
         cases = [
             ({"topic": "no_such_topic", "exercise": "cloze", "score": 1.0}, 404),
-            ({"topic": "articles", "exercise": "cloze"}, 400),
-            ({"topic": "articles", "exercise": "cloze", "score": 1.5}, 422),
-            ({"topic": "articles", "exercise": "cloze", "score": 1, "session_id": "../x"}, 422),
+            ({"topic": "articles_basic", "exercise": "cloze"}, 400),
+            ({"topic": "articles_basic", "exercise": "cloze", "score": 1.5}, 422),
+            ({"topic": "articles_basic", "exercise": "cloze", "score": 1, "session_id": "../x"}, 422),
         ]
         for payload, status in cases:
             with self.subTest(payload=payload):
@@ -622,16 +685,28 @@ class ApiTests(unittest.TestCase):
 
     def test_learner_topics_combine_speech_and_drills(self) -> None:
         self._analyzed_session()
-        topics = self.client.get("/api/learner/topics").json()["topics"]
-        verb_tense = next(t for t in topics if t["key"] == "verb_tense")
-        self.assertEqual(verb_tense["items"], 1)
-        self.assertEqual(verb_tense["due_items"], 1)
-        self.assertIsNone(verb_tense["accuracy"])
-        self.assertGreater(verb_tense["priority"], 0)
+        body = self.client.get("/api/learner/topics").json()
+        tense = next(t for t in body["topics"] if t["key"] == "present_perfect")
+        self.assertEqual(tense["items"], 1)
+        self.assertEqual(tense["due_items"], 1)
+        self.assertIsNone(tense["accuracy"])
+        self.assertGreater(tense["priority"], 0)
+        self.assertEqual((tense["area"], tense["level"]), ("tenses", "b1"))
+        area = next(a for a in body["areas"] if a["key"] == "tenses")
+        self.assertEqual((area["label"], area["items"]), ("Времена глагола", 1))
+
+    def test_curriculum_lists_levels_modules_and_lessons(self) -> None:
+        body = self.client.get("/api/curriculum").json()
+        self.assertEqual([level["key"] for level in body["levels"]], ["a2", "b1", "b2", "c1"])
+        first_module = body["levels"][0]["modules"][0]
+        self.assertEqual(first_module["lessons"][0], "present_simple_continuous")
+        self.assertIn("present_perfect", {t["key"] for t in body["topics"]})
 
     def test_today_is_empty_before_any_recording(self) -> None:
         body = self.client.get("/api/learner/today").json()
-        self.assertEqual([s["kind"] for s in body["steps"]], ["cards", "monologue", "dictation"])
+        self.assertEqual(
+            [s["kind"] for s in body["steps"]], ["cards", "monologue", "dictation", "lesson"]
+        )
         self.assertEqual(body["steps"][0]["status"], "empty")
         self.assertEqual(body["steps"][1]["status"], "todo")
         self.assertTrue(body["steps"][1]["prompt"]["question"])
@@ -639,16 +714,22 @@ class ApiTests(unittest.TestCase):
         # holding the whole workout back.
         self.assertEqual(body["steps"][2]["status"], "empty")
         self.assertIsNone(body["steps"][2]["lesson"])
+        # No mistakes yet: «Урок дня» is the course's first lesson, theory first.
+        lesson = body["steps"][3]
+        self.assertEqual(
+            (lesson["lesson"]["key"], lesson["reason"], lesson["action"], lesson["optional"]),
+            ("present_simple_continuous", "course", "theory", True),
+        )
         self.assertEqual(body["streak_days"], 0)
         self.assertIsNone(body["focus_topic"])
 
     def test_today_workout_tracks_each_step(self) -> None:
         session_id = self._analyzed_session()
         body = self.client.get("/api/learner/today").json()
-        cards, live, dictation_step = body["steps"]
+        cards, live, dictation_step, _lesson = body["steps"]
         self.assertEqual((cards["status"], cards["queue_total"]), ("todo", 1))
         self.assertEqual((live["status"], live["session_id"]), ("done", session_id))
-        self.assertEqual(body["focus_topic"]["key"], "verb_tense")
+        self.assertEqual(body["focus_topic"]["key"], "present_perfect")
         self.assertEqual(body["streak_days"], 1)
 
         self.client.post(
@@ -656,7 +737,9 @@ class ApiTests(unittest.TestCase):
             json={"item_id": cards["items"][0]["id"], "exercise": "card_translate", "correct": True},
         )
         body = self.client.get("/api/learner/today").json()
-        self.assertEqual([s["status"] for s in body["steps"]], ["done", "done", "empty"])
+        self.assertEqual(
+            [s["status"] for s in body["steps"]], ["done", "done", "empty", "todo"]
+        )
         self.assertEqual(dictation_step["kind"], "dictation")
         self.assertEqual(body["minutes_left"], 0)
 
@@ -679,11 +762,6 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/js/app.js")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["cache-control"], "no-cache")
-
-    def test_config_lists_speaking_prompts(self) -> None:
-        prompts = self.client.get("/api/config").json()["speaking_prompts"]
-        self.assertEqual(len(prompts), len(config.SPEAKING_PROMPTS))
-        self.assertEqual(prompts[3]["index"], 3)
 
 
     # ------------------------------------------------------- spoken drills
@@ -711,12 +789,23 @@ class ApiTests(unittest.TestCase):
 
     def test_a_talk_series_logs_only_its_first_round(self) -> None:
         self._hear("So uh I think we should ship it today", gaps={4: 3.0})
-        first = self._upload_drill("talk", prompt_index="2")
+        first = self._upload_drill("talk", prompt_id="travel:2")
         detail = self.client.get(f"/api/sessions/{first['session_id']}").json()
         self.assertEqual(detail["kind"], "talk")
+        question, hint = themes.THEME_BY_KEY["travel"].prompts[2]
         self.assertEqual(
-            detail["drill"], {"prompt_index": 2, "series": first["session_id"], "round": 1}
+            detail["drill"],
+            {
+                "prompt_id": "travel:2",
+                "question": question,
+                "hint": hint,
+                "theme": {"key": "travel", "label": "Путешествия"},
+                "series": first["session_id"],
+                "round": 1,
+            },
         )
+        # A take on a prompt makes its context the default.
+        self.assertEqual(self.client.get("/api/themes").json()["last"]["key"], "travel")
         metrics = detail["speech"]["metrics"]
         self.assertEqual((metrics["fillers"], metrics["long_pauses"]), (1, 1))
 
@@ -728,14 +817,15 @@ class ApiTests(unittest.TestCase):
 
         # Rounds 2 and 3 take the prompt of the series, whatever is sent.
         for expected_round in (2, 3):
-            take = self._upload_drill("talk", prompt_index="7", series=first["session_id"])
+            take = self._upload_drill("talk", prompt_id="news:1", series=first["session_id"])
             drill = self.client.get(f"/api/sessions/{take['session_id']}").json()["drill"]
-            self.assertEqual((drill["round"], drill["prompt_index"]), (expected_round, 2))
+            self.assertEqual((drill["round"], drill["prompt_id"]), (expected_round, "travel:2"))
         self.assertEqual(len(self._drill_attempts()), 1)
 
         series = self.client.get("/api/speech/talks").json()["series"]
         self.assertEqual(len(series), 1)
         self.assertEqual([r["round"] for r in series[0]["rounds"]], [1, 2, 3])
+        self.assertEqual(series[0]["prompt"]["hint"], hint)
         self.assertEqual(series[0]["rounds"][0]["metrics"]["fillers"], 1)
 
         usage = self.client.get("/api/usage").json()["by_purpose"]
@@ -743,28 +833,31 @@ class ApiTests(unittest.TestCase):
 
     def test_talk_takes_are_validated(self) -> None:
         self._upload_drill("talk", expect=400)
-        self._upload_drill("talk", expect=400, prompt_index=str(len(config.SPEAKING_PROMPTS)))
+        for bad in ("it_backend:99", "no_such:0", "own_1:0", "it_backend", "x"):
+            self._upload_drill("talk", expect=400, prompt_id=bad)
         monologue = self._upload_session()
         self._upload_drill(
-            "talk", expect=400, prompt_index="0", series=monologue["session_id"]
+            "talk", expect=400, prompt_id="it_backend:0", series=monologue["session_id"]
         )
-        self._upload_drill("talk", expect=404, prompt_index="0", series="2020-01-01_00-00-00")
-        self._upload_drill("talk", expect=400, prompt_index="0", series="..")
+        self._upload_drill(
+            "talk", expect=404, prompt_id="it_backend:0", series="2020-01-01_00-00-00"
+        )
+        self._upload_drill("talk", expect=400, prompt_id="it_backend:0", series="..")
         typed = self.client.post(
-            "/api/sessions", data={"kind": "talk", "text": "hello", "prompt_index": "0"}
+            "/api/sessions", data={"kind": "talk", "text": "hello", "prompt_id": "it_backend:0"}
         )
         self.assertEqual(typed.status_code, 400)
 
     def test_a_talk_without_filler_detection_is_not_scored(self) -> None:
         self._hear("Я думаю что да")
-        take = self._upload_drill("talk", prompt_index="0", language="ru")
+        take = self._upload_drill("talk", prompt_id="it_backend:0", language="ru")
         detail = self.client.get(f"/api/sessions/{take['session_id']}").json()
         self.assertIsNone(detail["speech"]["metrics"]["fillers"])
         self.assertEqual(self._drill_attempts(), [])
 
     def test_drills_are_not_analysed_and_do_not_fill_the_live_step(self) -> None:
         self._hear("Okay let me try this")
-        take = self._upload_drill("talk", prompt_index="0")
+        take = self._upload_drill("talk", prompt_id="it_backend:0")
         response = self.client.post(f"/api/sessions/{take['session_id']}/analyze")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.fake_analyzer.calls, 0)
@@ -822,7 +915,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(body["minutes_left"], minutes_before)
 
     # ------------------------------------------------------ AI exercise sets
-    def _create_set(self, topic: str = "verb_tense", force: bool = False) -> Dict:
+    def _create_set(self, topic: str = "present_perfect", force: bool = False) -> Dict:
         response = self.client.post("/api/practice/sets", json={"topic": topic, "force": force})
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
@@ -843,7 +936,7 @@ class ApiTests(unittest.TestCase):
     }
 
     def test_sets_are_listed_per_allowed_topic_with_a_price(self) -> None:
-        body = self.client.get("/api/practice/sets", params={"topic": "articles"}).json()
+        body = self.client.get("/api/practice/sets", params={"topic": "articles_basic"}).json()
         self.assertEqual(body["sets"], [])
         self.assertEqual(body["cost_estimate_usd"], config.SET_COST_ESTIMATE_USD)
         self.assertFalse(body["anthropic_configured"])
@@ -861,7 +954,7 @@ class ApiTests(unittest.TestCase):
         first = self._create_set()
         self.assertFalse(first["reused"])
         exercise_set = first["set"]
-        self.assertEqual(exercise_set["topic"], "verb_tense")
+        self.assertEqual(exercise_set["topic"], "present_perfect")
         self.assertEqual(len(exercise_set["exercises"]), 4)
         self.assertGreater(exercise_set["generation"]["usage"]["cost_usd"], 0)
         seeds = self.fake_generator.generated[0]["seeds"]
@@ -879,7 +972,7 @@ class ApiTests(unittest.TestCase):
 
         usage = self.client.get("/api/usage").json()
         self.assertEqual(usage["by_purpose"]["anthropic:exercise_set"]["calls"], 2)
-        listed = self.client.get("/api/practice/sets", params={"topic": "verb_tense"}).json()
+        listed = self.client.get("/api/practice/sets", params={"topic": "present_perfect"}).json()
         self.assertEqual(len(listed["sets"]), 2)
         average = usage["by_purpose"]["anthropic:exercise_set"]["avg_cost_usd"]
         self.assertEqual(listed["cost_estimate_usd"], average)
@@ -892,11 +985,11 @@ class ApiTests(unittest.TestCase):
 
         self.fake_generator.generate = failing(MissingAnthropicApiKeyError("no key"))
         self.assertEqual(
-            self.client.post("/api/practice/sets", json={"topic": "articles"}).status_code, 400
+            self.client.post("/api/practice/sets", json={"topic": "articles_basic"}).status_code, 400
         )
         self.fake_generator.generate = failing(AnalysisError("upstream"))
         self.assertEqual(
-            self.client.post("/api/practice/sets", json={"topic": "articles"}).status_code, 502
+            self.client.post("/api/practice/sets", json={"topic": "articles_basic"}).status_code, 502
         )
 
     def test_set_ids_are_guarded(self) -> None:
@@ -929,7 +1022,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["summary"]["best_score"], 1.0)
 
         topics = self.client.get("/api/learner/topics").json()["topics"]
-        self.assertEqual(next(t for t in topics if t["key"] == "verb_tense")["accuracy"], 1.0)
+        self.assertEqual(next(t for t in topics if t["key"] == "present_perfect")["accuracy"], 1.0)
         history = self.client.get("/api/learner/history").json()["days"][0]["drills"][0]
         self.assertEqual((history["exercise"], history["set_id"]), ("ai_set", set_id))
         usage = self.client.get("/api/usage").json()["by_purpose"]
@@ -958,11 +1051,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(from_set), 1)
         self.assertEqual(from_set[0]["content"]["correction"], "I have already fixed the bug.")
         self.assertEqual(from_set[0]["exercise"]["russian"], "Я уже починил баг.")
+        # Filed under the topic Claude tagged the mistake with, not the set's.
+        self.assertEqual(from_set[0]["topic"], "sentence_structure")
 
         again = self._submit(set_id, answers)
         self.assertEqual(len(self.fake_generator.graded), 1)  # verdict came from the cache
         ex3 = next(r for r in again["run"]["results"] if r["exercise_id"] == "ex3")
-        self.assertEqual(ex3["graded_by"], "cache")
+        self.assertEqual((ex3["graded_by"], ex3["topic"]), ("cache", "sentence_structure"))
         self.assertEqual(again["new_cards"], 0)
         self.assertEqual(again["summary"]["runs"], 2)
 
@@ -983,20 +1078,21 @@ class ApiTests(unittest.TestCase):
         ex3 = next(r for r in body["run"]["results"] if r["exercise_id"] == "ex3")
         self.assertEqual((ex3["graded_by"], ex3["correct"]), ("self", True))
 
-    def test_today_offers_an_optional_set_on_the_main_topic(self) -> None:
-        self._analyzed_session()
+    def test_lesson_of_the_day_follows_the_mistakes_and_its_next_action(self) -> None:
+        self._analyzed_session()  # a mistake on present_perfect
         with patch.object(config, "get_anthropic_api_key", return_value="key"):
             body = self.client.get("/api/learner/today").json()
         step = body["steps"][-1]
-        self.assertEqual((step["kind"], step["status"], step["optional"]), ("ai_set", "todo", True))
-        self.assertEqual(step["topic"]["key"], "verb_tense")
-        self.assertIsNone(step["set_id"])
-        self.assertEqual(step["cost_usd"], config.SET_COST_ESTIMATE_USD)
-        self.assertEqual(body["minutes_left"], 0)  # one card (~0.5 min); the set is optional
+        self.assertEqual((step["kind"], step["status"], step["optional"]), ("lesson", "todo", True))
+        self.assertEqual((step["lesson"]["key"], step["reason"]), ("present_perfect", "mistakes"))
+        self.assertEqual((step["action"], step["speech_mistakes"]), ("theory", 1))
+        self.assertEqual(step["cost_usd"], config.THEORY_COST_ESTIMATE_USD)
+        self.assertEqual(body["minutes_left"], 0)  # one card (~0.5 min); the lesson is optional
 
-        # Without a key the step only shows for a set that is already paid for.
-        steps = self.client.get("/api/learner/today").json()["steps"]
-        self.assertNotIn("ai_set", [step["kind"] for step in steps])
+        learner_store.add_theory_version("present_perfect", {"created_at": "2026-09-26T09:00:00"})
+        step = self.client.get("/api/learner/today").json()["steps"][-1]
+        self.assertEqual((step["action"], step["set_id"]), ("set", None))
+        self.assertEqual(step["cost_usd"], config.SET_COST_ESTIMATE_USD)
         set_id = self._create_set()["set"]["id"]
         step = self.client.get("/api/learner/today").json()["steps"][-1]
         self.assertEqual((step["set_id"], step["cost_usd"]), (set_id, 0.0))
@@ -1004,6 +1100,10 @@ class ApiTests(unittest.TestCase):
         self._submit(set_id, self.GOOD_ANSWERS)
         step = self.client.get("/api/learner/today").json()["steps"][-1]
         self.assertEqual((step["status"], step["score"]), ("done", 1.0))
+        self.assertEqual(step["lesson"]["key"], "present_perfect")
+
+        roadmap = self.client.get("/api/roadmap").json()
+        self.assertEqual([r["id"] for r in roadmap["recommended"]], ["present_perfect"])
 
 
 class FakeFetcher:
@@ -1318,6 +1418,64 @@ class DictationTranslationApiTests(unittest.TestCase):
 
         self.assertEqual([p["sentences"] for p in body["parts"]], [2])
         self.assertEqual(self.translator.splits, [])
+
+
+class RoadmapApiTests(unittest.TestCase):
+    """GET /api/roadmap and the lesson marks - no model calls at all."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base_dir_patch = patch.object(config, "base_dir", return_value=Path(self._tmp.name))
+        base_dir_patch.start()
+        self.addCleanup(base_dir_patch.stop)
+        self.client = TestClient(fastapi_app)
+
+    @staticmethod
+    def _lesson(data: Dict, lesson_id: str) -> Dict:
+        return next(
+            lesson
+            for level in data["levels"]
+            for module in level["modules"]
+            for lesson in module["lessons"]
+            if lesson["id"] == lesson_id
+        )
+
+    def test_fresh_roadmap_starts_at_the_first_lesson(self) -> None:
+        data = self.client.get("/api/roadmap").json()
+        self.assertEqual(data["continue"], "present_simple_continuous")
+        self.assertEqual(data["counts"]["not_started"], data["total"])
+
+    def test_marks_are_logged_and_can_be_cleared(self) -> None:
+        url = "/api/roadmap/lessons/present_simple_continuous/mark"
+        data = self.client.post(url, json={"mark": "known"}).json()
+        self.assertEqual(self._lesson(data, "present_simple_continuous")["status"], "known")
+        self.assertEqual(data["continue"], "past_simple")
+
+        data = self.client.post(url, json={"mark": None}).json()
+        self.assertEqual(self._lesson(data, "present_simple_continuous")["status"], "not_started")
+        marks = learner_store.load_roadmap_marks()
+        self.assertEqual([m["mark"] for m in marks], ["known", None])
+
+    def test_set_runs_drive_the_status(self) -> None:
+        import datetime as dt
+
+        for day in (21, 22):
+            learner_store.append_attempt(
+                None, "ai_set", True, topic="past_simple", score=0.9,
+                set_id="set-x", when=dt.datetime(2026, 9, day, 10),
+            )
+        data = self.client.get("/api/roadmap").json()
+        self.assertEqual(self._lesson(data, "past_simple")["status"], "mastered")
+
+    def test_rejects_unknown_lessons_and_marks(self) -> None:
+        bad_lesson = self.client.post("/api/roadmap/lessons/other/mark", json={"mark": "known"})
+        self.assertEqual(bad_lesson.status_code, 404)
+        bad_mark = self.client.post(
+            "/api/roadmap/lessons/past_simple/mark", json={"mark": "mastered"}
+        )
+        self.assertEqual(bad_mark.status_code, 422)
+        self.assertEqual(learner_store.load_roadmap_marks(), [])
 
 
 class SessionDirectoryGuardTests(unittest.TestCase):

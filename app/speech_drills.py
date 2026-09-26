@@ -16,7 +16,6 @@ itself is never touched. Like app.learner_model, this module does no I/O.
 
 from __future__ import annotations
 
-import datetime as dt
 import difflib
 import re
 from typing import Any, Dict, List, Optional, Sequence
@@ -247,11 +246,3 @@ def pick_passage(passages: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]
     if not passages:
         return None
     return min(passages, key=lambda p: (p.get("best_score") or 0.0, p.get("attempts", 0)))
-
-
-# ------------------------------------------------------------------- talk
-def talk_prompt_index(today: dt.date) -> int:
-    """The day's «60 секунд» prompt: half the list away from the monologue's,
-    so the two live activities of a day are never on the same question."""
-    count = len(config.SPEAKING_PROMPTS)
-    return (today.toordinal() + count // 2) % count

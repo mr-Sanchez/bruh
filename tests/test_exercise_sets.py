@@ -24,7 +24,7 @@ from app.exercise_sets import (  # noqa: E402
     assemble_exercises,
 )
 
-TOPIC = {"key": "verb_tense", "label": "Времена", "description": "время глагола"}
+TOPIC = {"key": "present_perfect", "label": "Времена", "description": "время глагола"}
 
 
 def sample_set() -> GeneratedSet:
@@ -135,9 +135,10 @@ class GradeTests(unittest.TestCase):
     def test_grade_maps_verdicts_back_to_exercise_ids(self) -> None:
         grading = Grading(verdicts=[
             Verdict(number=2, correct=False, comment="Нужно Present Perfect.",
-                    corrected="I have fixed it."),
-            Verdict(number=1, correct=True, comment="Верно.", corrected="It works."),
-            Verdict(number=7, correct=True, comment="лишний", corrected=""),
+                    corrected="I have fixed it.", topic="present_perfect"),
+            Verdict(number=1, correct=True, comment="Верно.", corrected="It works.",
+                    topic="present_perfect"),
+            Verdict(number=7, correct=True, comment="лишний", corrected="", topic="other"),
         ])
         generator, messages = generator_with(grading)
         answers = [
@@ -148,12 +149,21 @@ class GradeTests(unittest.TestCase):
         ]
         result = generator.grade(TOPIC, answers)
 
-        self.assertEqual(messages.calls[0]["model"], config.GRADING_MODEL)
-        self.assertNotIn("output_config", messages.calls[0])  # Haiku takes no effort
-        self.assertIn("Learner: I fixed it.", messages.calls[0]["messages"][0]["content"])
+        call = messages.calls[0]
+        self.assertEqual(call["model"], config.GRADING_MODEL)
+        self.assertEqual(call["output_config"], {"effort": config.GRADING_EFFORT})
+        self.assertIn('"sentence_structure"', call["system"])  # the taxonomy to tag from
+        self.assertNotIn("{taxonomy}", call["system"])
+        self.assertIn("Learner: I fixed it.", call["messages"][0]["content"])
         self.assertEqual(set(result.verdicts), {"ex5", "ex6"})
         self.assertFalse(result.verdicts["ex6"]["correct"])
         self.assertEqual(result.verdicts["ex6"]["corrected"], "I have fixed it.")
+        self.assertEqual(result.verdicts["ex6"]["topic"], "present_perfect")
+        self.assertEqual(result.call.effort, config.GRADING_EFFORT)
+
+    def test_a_verdict_topic_outside_the_taxonomy_is_rejected_by_the_schema(self) -> None:
+        with self.assertRaises(ValueError):
+            Verdict(number=1, correct=False, comment="", corrected="", topic="there_is")
 
 
 if __name__ == "__main__":

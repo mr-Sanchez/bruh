@@ -272,6 +272,7 @@ button.success { background: var(--success); }
 
 .progress-bar { height: 4px; border-radius: 999px; background: var(--border); overflow: hidden; }
 .progress-bar > div { height: 100%; background: var(--accent); }
+.data-table .progress-bar { min-width: 90px; }
 
 .gap-sentence { line-height: 2.1; }
 .gap-input {
@@ -407,6 +408,10 @@ button.success { background: var(--success); }
 .data-table th, .data-table td { padding: 7px 6px; border-bottom: 1px solid var(--border); }
 .data-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .data-table th:not(:first-child) { text-align: right; }
+/* Topic mastery: an area row (totals), then its topics indented under it. */
+.data-table .area-row th, .data-table .area-row td { color: var(--text); font-weight: 600; font-size: 0.9rem; }
+.data-table .topic-cell { padding-left: 18px; }
+.area-heading { margin: 14px 0 4px; font-size: 0.95rem; color: var(--text-muted); }
 
 .mistake-group { border-bottom: 1px solid var(--border); }
 .mistake-list { list-style: none; margin: 0 0 10px; padding: 0 0 0 4px; }
@@ -431,6 +436,63 @@ a.activity:hover { border-color: var(--accent); }
 .activity.is-soon { opacity: 0.55; }
 .activity-icon { font-size: 1.6rem; }
 .history-day { display: flex; justify-content: space-between; gap: 12px; padding: 12px 4px; }
+
+/* --- Context picker «уклон» ------------------------------------------------ */
+.theme-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 10px 0; }
+.theme-picker label { display: flex; align-items: center; gap: 8px; margin: 0; }
+.theme-picker select { width: auto; max-width: 100%; }
+.theme-extra { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.theme-extra input { width: 16em; max-width: 100%; }
+.theme-picker [hidden] { display: none; }
+.speaking-prompt .theme-picker { margin-top: 0; }
+
+/* --- Lesson theory ------------------------------------------------------------- */
+.theory-summary { font-size: 1.05rem; font-weight: 500; }
+.theory h3 { margin: 18px 0 6px; font-size: 0.98rem; }
+.theory-examples { margin: 6px 0 10px; padding-left: 20px; }
+.theory-examples li { margin: 3px 0; }
+.theory-versions { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.85rem; }
+.theory-versions select { width: auto; }
+
+/* --- Module entry test ------------------------------------------------------- */
+.test-question { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.test-question:last-of-type { border-bottom: none; }
+.test-options { display: flex; flex-direction: column; gap: 4px; }
+.test-options label { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: normal; }
+.test-options input { width: auto; }
+
+/* --- «Курс» (roadmap) ---------------------------------------------------- */
+.roadmap-level > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.roadmap-level > summary::-webkit-details-marker { display: none; }
+.roadmap-level > summary h2 { margin: 0; }
+.roadmap-level > summary h2::before { content: "▸ "; color: var(--text-muted); }
+.roadmap-level[open] > summary h2::before { content: "▾ "; }
+.roadmap-lesson .pill { margin-right: 6px; }
+.topic-row[hidden] { display: none; }
+.lesson-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0; }
+.roadmap-lesson .button-row { margin: 0; gap: 6px; flex-wrap: nowrap; align-items: center; }
+.link-button {
+  background: none;
+  color: var(--accent);
+  padding: 4px 6px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.lesson-not_started { background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); }
+.lesson-theory, .lesson-practising { background: var(--accent-weak); color: var(--accent); }
+.lesson-mastered { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.lesson-known { background: color-mix(in srgb, var(--success) 8%, transparent); color: var(--success); }
+.lesson-skipped { background: var(--bg); color: var(--text-muted); font-style: italic; }
+@media (max-width: 640px) {
+  .roadmap-lesson { flex-direction: column; align-items: flex-start; gap: 6px; }
+}
 
 /* --- Описание картинки ------------------------------------------------- */
 .picture-picker { margin: 4px 0 12px; }

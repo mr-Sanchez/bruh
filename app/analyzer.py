@@ -5,8 +5,8 @@ it into an LLM chat yourself" workflow (see the README's former manual-prompt
 section). Feedback content mirrors that original prompt's categories (tense,
 word order, prepositions, agreement, word choice, run-ons, fillers,
 repetitions, naturalness) but is additionally tagged with a topic from the
-fixed taxonomy in app.progress_store, so mistakes can be aggregated across
-sessions into a "what to practice" view.
+closed catalogue in app.curriculum (the topics the roadmap's lessons teach),
+so mistakes can be aggregated across sessions into a "what to practice" view.
 
 The feedback is shaped like a speaking coach's review rather than an error
 list: each mistake carries a minimal correction plus simpler/more natural
@@ -45,14 +45,13 @@ from typing import Any, Callable, Dict, Final, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from app import config, utils
-from app.progress_store import TOPIC_KEYS, TOPIC_TAXONOMY
+from app import config, curriculum, themes, utils
 
 logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[str], Any]
 
-TopicKey = Literal[*TOPIC_KEYS]
+TopicKey = Literal[*curriculum.TOPIC_KEYS]
 Severity = Literal["minor", "moderate", "major"]
 
 # Bumped whenever the shape of analysis.json changes. v1 had only
@@ -60,7 +59,8 @@ Severity = Literal["minor", "moderate", "major"]
 # frontend still renders v1 files, it just shows fewer sections. v3 adds
 # kind / input_mode and, for pictures, not_mentioned + scene_vocabulary.
 # v4 adds issues[].drills - the practice sentences cards are built from.
-ANALYSIS_SCHEMA_VERSION: Final[int] = 4
+# v5: issues[].topic is a taxonomy v2 key (app/curriculum.py).
+ANALYSIS_SCHEMA_VERSION: Final[int] = 5
 
 SCORE_MIN: Final[int] = 1
 SCORE_MAX: Final[int] = 10
@@ -142,6 +142,28 @@ class PictureAnalysis(SpeechAnalysis):
     scene_vocabulary: List[KeyPhrase] = Field(default_factory=list)
 
 
+class MissedUse(BaseModel):
+    """A place where the lesson's construction was needed but not used."""
+
+    quote: str
+    better: str
+
+
+class LessonCheck(BaseModel):
+    """How well a lesson's spoken task used the lesson's rule (Stage 8, R6)."""
+
+    score: int
+    verdict: str
+    good_uses: List[str] = Field(default_factory=list)
+    missed: List[MissedUse] = Field(default_factory=list)
+
+
+class LessonAnalysis(SpeechAnalysis):
+    """The schema for a lesson's spoken task: the usual feedback plus the rule check."""
+
+    lesson_check: LessonCheck
+
+
 @dataclass(frozen=True)
 class ImageInput:
     """The picture a description is about, as sent to Claude."""
@@ -172,6 +194,8 @@ class AnalysisResult:
     # Picture descriptions only; empty for a monologue.
     not_mentioned: List[SceneDetail] = field(default_factory=list)
     scene_vocabulary: List[KeyPhrase] = field(default_factory=list)
+    # A lesson's spoken task only: LessonCheck as a dict (score clamped 1..10).
+    lesson_check: Optional[Dict[str, Any]] = None
     model: str = config.ANALYSIS_MODEL
     effort: str = config.DEFAULT_ANALYSIS_EFFORT
     request_id: Optional[str] = None
@@ -184,10 +208,6 @@ def _default_client_factory(api_key: str) -> Any:
     import anthropic
 
     return anthropic.Anthropic(api_key=api_key)
-
-
-def _topic_taxonomy_lines() -> str:
-    return "\n".join(f'- "{key}": {info["description"]}' for key, info in TOPIC_TAXONOMY.items())
 
 
 SYSTEM_PROMPT_TEMPLATE = """You are a friendly, practical Russian-speaking speaking coach reviewing a \
@@ -236,15 +256,17 @@ as a short formula (for example "help someone + verb", "If + Present \
 Simple, will + verb", "might + base verb", "improve X by doing Y") with 1-3 \
 short example sentences, ideally from the speaker's own context (IT, work, \
 learning). null when there is no useful general rule.
-- `topic`: exactly one key from this fixed list (use the key exactly as \
-written, do not invent new keys):
+- `topic`: exactly one key from this fixed list, grouped by area (use the \
+key exactly as written, do not invent new keys). Pick the most specific \
+topic that names the mistake - for a wrong tense, the tense that was needed:
 {taxonomy}
   Use "other" sparingly, only when nothing else fits.
 - `severity`: "minor" (barely noticeable), "moderate" (a native listener \
 would notice), "major" (impedes understanding, or is systematic/frequent).
 - `drills`: {drills} practice sentences for this mistake, used later as \
-flashcards "say it in English". Each is a NEW situation (work, IT, everyday \
-life - vary people and settings), never the speaker's own sentence or a \
+flashcards "say it in English". Each is a NEW situation taken from the \
+"Context for drills" line of the request (vary people and settings within \
+it), never the speaker's own sentence or a \
 paraphrase of it, and needs exactly the construction or word choice the \
 speaker got wrong - so saying it right means having learned the fix. \
 `russian`: one natural, unambiguous Russian sentence of 5-14 words whose \
@@ -316,6 +338,24 @@ text reads (linking words, sentence flow); it is not counted in the overall \
 score."""
 
 
+LESSON_PROMPT = """
+
+This is the SPOKEN TASK of a course lesson: the speaker was asked to talk on \
+a task that needs the lesson's construction (given in the request). Review \
+the language exactly as above, and additionally fill `lesson_check`:
+- `score`: {score_min}-{score_max}, how well the speaker used the lesson's \
+construction: used where needed, correctly, and more than once. Using it \
+rarely or avoiding it lowers the score even if the rest is correct.
+- `verdict`: 1-3 Russian sentences - whether they used it, how well, and \
+the one thing to fix about it.
+- `good_uses`: verbatim quotes from the transcript where it was used \
+correctly (empty if none).
+- `missed`: places where it was needed but missing or wrong: `quote` \
+verbatim, `better` the same thing said with the construction.
+Mistakes with the construction also go to `issues` as usual, under the \
+lesson's topic key."""
+
+
 class ClaudeAnalyzer:
     """Thin, testable wrapper around a single structured-output Claude call."""
 
@@ -346,11 +386,16 @@ class ClaudeAnalyzer:
         *,
         image: Optional[ImageInput] = None,
         typed: bool = False,
+        theme: Optional[Dict[str, Optional[str]]] = None,
+        lesson: Optional[Dict[str, Any]] = None,
     ) -> AnalysisResult:
         """Analyze a verbatim transcript. Never modifies the transcript itself.
 
         With `image`, the transcript is a description of that picture; with
-        `typed`, the learner wrote it instead of speaking it.
+        `typed`, the learner wrote it instead of speaking it. `theme` is the
+        context («уклон») the practice sentences are set in. `lesson` makes it
+        a lesson's spoken task: {"key", "label", "description", "task", "use"}
+        - the rule is checked in `lesson_check`.
         """
         if not self._api_key:
             raise MissingAnthropicApiKeyError(config.MISSING_ANTHROPIC_API_KEY_MESSAGE)
@@ -358,7 +403,7 @@ class ClaudeAnalyzer:
             raise AnalysisError("There is no transcript to analyze yet.")
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-            taxonomy=_topic_taxonomy_lines(),
+            taxonomy=curriculum.taxonomy_prompt_lines(),
             score_min=SCORE_MIN,
             score_max=SCORE_MAX,
             drills=config.DRILLS_PER_ISSUE,
@@ -367,6 +412,15 @@ class ClaudeAnalyzer:
             system_prompt += PICTURE_PROMPT
         if typed:
             system_prompt += TYPED_PROMPT
+        lesson_lines = ""
+        if lesson is not None:
+            system_prompt += LESSON_PROMPT.format(score_min=SCORE_MIN, score_max=SCORE_MAX)
+            lesson_lines = (
+                f"Lesson: {lesson['label']} (topic key {lesson['key']}) - "
+                f"{lesson.get('description', '')}\n"
+                f"Task given: {lesson.get('task', '')}\n"
+                f"Construction to use: {lesson.get('use', '')}\n"
+            )
         source = (
             "Typed text (verbatim, as the learner wrote it)"
             if typed
@@ -375,6 +429,8 @@ class ClaudeAnalyzer:
         )
         user_message = (
             f"Practiced language: {profile.label} ({profile.language})\n"
+            f"Context for drills: {themes.model_context(theme)}\n"
+            f"{lesson_lines}"
             f"{source}:\n---\n"
             f"{transcript}\n---\n"
             "Analyze this transcript per your instructions and return the "
@@ -410,7 +466,11 @@ class ClaudeAnalyzer:
                 max_tokens=config.ANALYSIS_MAX_TOKENS,
                 system=system_prompt,
                 messages=[{"role": "user", "content": content}],
-                output_format=PictureAnalysis if image is not None else SpeechAnalysis,
+                output_format=(
+                    PictureAnalysis
+                    if image is not None
+                    else LessonAnalysis if lesson is not None else SpeechAnalysis
+                ),
                 output_config={"effort": self._effort},
                 thinking={"type": "adaptive"},
                 timeout=self._timeout_seconds,
@@ -456,6 +516,7 @@ class ClaudeAnalyzer:
             overall_score=_overall_score(scores, skip=("fluency",) if typed else ()),
             not_mentioned=list(getattr(parsed, "not_mentioned", [])),
             scene_vocabulary=list(getattr(parsed, "scene_vocabulary", [])),
+            lesson_check=_lesson_check(getattr(parsed, "lesson_check", None)),
             model=self._model,
             effort=self._effort,
             request_id=request_id,
@@ -521,6 +582,15 @@ def _clamped_scores(scores: Optional[Scores]) -> Optional[Scores]:
         item: Score = getattr(clamped, name)
         item.score = min(SCORE_MAX, max(SCORE_MIN, item.score))
     return clamped
+
+
+def _lesson_check(check: Optional[LessonCheck]) -> Optional[Dict[str, Any]]:
+    """The rule check of a lesson's spoken task as stored, score in range."""
+    if check is None:
+        return None
+    data = check.model_dump()
+    data["score"] = min(SCORE_MAX, max(SCORE_MIN, check.score))
+    return data
 
 
 def _overall_score(scores: Optional[Scores], skip: tuple = ()) -> Optional[float]:

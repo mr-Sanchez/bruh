@@ -4,7 +4,9 @@
 //   2. one live activity - a monologue on the day's prompt (a picture
 //      description done today counts too);
 //   3. a few sentences of listening dictation from a YouTube lesson ($0);
-//   4. optional and paid: an AI exercise set on the main topic;
+//   4. optional: «Урок дня» of the course - the lesson the learner's mistakes
+//      ask for most (else «Продолжить»), with its next action (theory, a set,
+//      the spoken task); it replaced the AI-set step on 2026-09-26;
 //   5. optional, Deepgram only: a spoken warm-up («60 секунд» or shadowing).
 // Each step's done/todo state comes from the attempts log and today's
 // recordings, so the screen stays right after a reload.
@@ -17,7 +19,7 @@ Views.today = (() => {
     cards: "Карточки",
     monologue: "Монолог",
     dictation: "Диктант на слух",
-    ai_set: "AI-набор по главной теме",
+    lesson: "Урок дня",
     speech: "Речевая разминка",
   };
 
@@ -34,7 +36,7 @@ Views.today = (() => {
     }
     if (root !== container) return;
 
-    // The AI set is optional (it costs money): it never holds back "all done".
+    // Optional steps (the lesson's actions cost money) never hold back "all done".
     const allDone = workout.steps.every((s) => s.optional || s.status === "done" || s.status === "empty");
     container.innerHTML = `
       <div class="card">
@@ -105,7 +107,7 @@ Views.today = (() => {
   function renderStep(step) {
     if (step.kind === "cards") return renderCards(step);
     if (step.kind === "dictation") return renderDictation(step);
-    if (step.kind === "ai_set") return renderSet(step);
+    if (step.kind === "lesson") return renderLesson(step);
     if (step.kind === "speech") return renderSpeech(step);
     return renderMonologue(step);
   }
@@ -132,21 +134,44 @@ Views.today = (() => {
     return stepShell(step, body, `<a href="${href}"><button>${step.done_today ? "Продолжить" : "Начать"}</button></a>`);
   }
 
-  function renderSet(step) {
-    const topic = escapeHtml(step.topic.label);
+  // «Урок дня»: which lesson, why, and the one next thing to do in it.
+  const ACTION_TEXT = {
+    theory: "начните с теории",
+    set: "пройдите набор упражнений",
+    spoken: "запишите устное задание — правило в живой речи",
+  };
+
+  function renderLesson(step) {
+    const lesson = step.lesson;
+    const link = `<a href="#/practice/${encodeURIComponent(lesson.key)}">${escapeHtml(lesson.label)}</a>`;
     if (step.status === "done") {
-      return stepShell(step, `<p class="muted">${topic}: ${Math.round(step.score * 100)}% верно.</p>`);
+      const what = step.exercise === "lesson_task" ? "устное задание" : "набор";
+      return stepShell(
+        step,
+        `<p class="muted">${link}: ${what} — ${Math.round(step.score * 100)}%.</p>`
+      );
     }
+    const why =
+      step.reason === "mistakes"
+        ? `по вашим ошибкам в речи (${step.speech_mistakes})`
+        : "следующий урок курса";
     const body = `
-      <p class="muted">${topic} · 8–10 новых упражнений на ваших ошибках; ошибки станут карточками</p>
+      <p class="muted">${link} · ${escapeHtml(lesson.level_label)} · ${why}</p>
+      <p class="muted">Дальше: ${ACTION_TEXT[step.action]}${
+        step.cost_usd ? ` · ≈ ${formatCents(step.cost_usd)}` : ""
+      }.</p>
+      ${step.action === "set" && !step.set_id && step.anthropic_configured ? `<div data-role="set-theme"></div>` : ""}
       <p class="muted" data-role="set-status"></p>`;
-    const action = step.set_id
-      ? `<button data-role="ai-set">Начать</button>`
-      : `<button class="secondary" data-role="ai-set">Составить · ≈ ${formatCents(step.cost_usd)}</button>`;
+    let action = `<a href="#/practice/${encodeURIComponent(lesson.key)}"><button>К уроку</button></a>`;
+    if (step.action === "set" && step.set_id) {
+      action = `<button data-role="lesson-set">Начать набор</button>`;
+    } else if (step.action === "set" && step.anthropic_configured) {
+      action = `<button class="secondary" data-role="lesson-set">Составить · ≈ ${formatCents(step.cost_usd)}</button>`;
+    }
     return stepShell(step, body, action);
   }
 
-  // Deepgram only, so it is optional like the AI set: «60 секунд» on the
+  // Deepgram only, so it is optional like «Урок дня»: «60 секунд» on the
   // day's prompt, or shadowing the passage that needs it most.
   function renderSpeech(step) {
     if (step.status === "done") {
@@ -159,7 +184,7 @@ Views.today = (() => {
     }
     const passage = step.passage;
     const body = `
-      <p class="muted">Минута на тему «${escapeHtml(step.prompt.hint)}» — три раза подряд;
+      <p class="muted">Минута на тему «${escapeHtml(step.prompt.hint)}» (${escapeHtml(step.prompt.theme.label)}) — три раза подряд;
         считаем темп, паразиты и паузы.</p>
       ${
         passage
@@ -168,7 +193,11 @@ Views.today = (() => {
             )}">прочитайте вслух отрывок</a> своей «улучшенной версии».</p>`
           : ""
       }`;
-    return stepShell(step, body, `<a href="#/talk/${step.prompt.index}"><button>Начать</button></a>`);
+    return stepShell(
+      step,
+      body,
+      `<a href="#/talk/${encodeURIComponent(step.prompt.id)}"><button>Начать</button></a>`
+    );
   }
 
   function renderCards(step) {
@@ -198,7 +227,7 @@ Views.today = (() => {
     const prompt = step.prompt;
     const question = `
       <p class="speaking-question">${escapeHtml(prompt.question)}</p>
-      <p class="muted">${escapeHtml(prompt.hint)} · 1–3 минуты, затем анализ</p>
+      <p class="muted">${escapeHtml(prompt.hint)} · уклон «${escapeHtml(prompt.theme.label)}» · 1–3 минуты, затем анализ</p>
       <p class="muted">Или вместо монолога <a href="#/picture">опишите картинку</a>.</p>`;
     if (step.status === "done") {
       return stepShell(
@@ -214,7 +243,11 @@ Views.today = (() => {
         `<a href="#/session/${encodeURIComponent(step.session_id)}"><button>К записи</button></a>`
       );
     }
-    return stepShell(step, question, `<a href="#/record/${prompt.index}"><button>Записать</button></a>`);
+    return stepShell(
+      step,
+      question,
+      `<a href="#/record/${encodeURIComponent(prompt.id)}"><button>Записать</button></a>`
+    );
   }
 
   function renderScores(history) {
@@ -243,15 +276,22 @@ Views.today = (() => {
     }
     // A paid click: an already generated set opens as is, otherwise one is
     // generated now (the server still hands back an unstarted set if any).
-    const setStep = workout.steps.find((s) => s.kind === "ai_set");
-    const setButton = container.querySelector('[data-role="ai-set"]');
+    const lessonStep = workout.steps.find((s) => s.kind === "lesson");
+    const setButton = container.querySelector('[data-role="lesson-set"]');
+    const themeHost = container.querySelector('[data-role="set-theme"]');
+    let picker = null;
+    if (themeHost) {
+      ThemePicker.mount(themeHost)
+        .then((p) => (picker = p))
+        .catch(() => (themeHost.textContent = ""));
+    }
     if (setButton) {
       setButton.addEventListener("click", async () => {
         const status = container.querySelector('[data-role="set-status"]');
         setButton.disabled = true;
-        if (!setStep.set_id) status.textContent = "Claude составляет набор — обычно 10–30 секунд…";
+        if (!lessonStep.set_id) status.textContent = "Claude составляет набор — обычно 10–30 секунд…";
         try {
-          const data = setStep.set_id ? await Api.getSet(setStep.set_id) : await Api.createSet(setStep.topic.key);
+          const data = lessonStep.set_id ? await Api.getSet(lessonStep.set_id) : await Api.createSet(lessonStep.lesson.key, false, picker ? picker.value() : null);
           if (root !== container) return;
           Drill.runSet(container, data.set, { context: "today", onFinish: again });
         } catch (err) {

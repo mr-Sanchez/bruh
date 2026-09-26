@@ -60,6 +60,9 @@ class Session:
     # Spoken drills only: what was practised (talk: prompt, series, round;
     # shadowing: the source recording, passage and its reference text).
     drill: Optional[Dict[str, Any]] = None
+    # A roadmap lesson's spoken task (Stage 8, R6): {"id", "task": {"id",
+    # "question", "hint", "use", "theme"}} - the task as it was shown.
+    lesson: Optional[Dict[str, Any]] = None
 
     @property
     def audio_path(self) -> Path:
@@ -130,6 +133,7 @@ def write_session_meta(session: Session) -> Path:
         "input_mode": session.input_mode,
         "image_filename": session.image_filename,
         "drill": session.drill,
+        "lesson": session.lesson,
     }
     return write_json(session.session_meta_path, payload)
 
@@ -158,6 +162,7 @@ def read_session_meta(directory: Path) -> Optional[Session]:
         input_mode=payload.get("input_mode") or config.INPUT_VOICE,
         image_filename=payload.get("image_filename") or None,
         drill=payload.get("drill") if isinstance(payload.get("drill"), dict) else None,
+        lesson=payload.get("lesson") if isinstance(payload.get("lesson"), dict) else None,
     )
     if session.transcript_path.is_file():
         session.transcript = read_transcript_body(session.transcript_path)

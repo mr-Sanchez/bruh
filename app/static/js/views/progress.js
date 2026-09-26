@@ -1,6 +1,7 @@
-// Progress view: speech scores over time (one small chart per skill), topic
-// mastery (speech + exercises), spoken-drill measurements, the dictation's
-// tricky words, the mistake bank and what the APIs cost.
+// Progress view: the course (per level, lessons in progress), speech scores
+// over time (one small chart per skill), topic mastery (speech + exercises),
+// spoken-drill measurements, the dictation's tricky words, the mistake bank
+// and what the APIs cost.
 window.Views = window.Views || {};
 
 Views.progress = (() => {
@@ -12,14 +13,16 @@ Views.progress = (() => {
     let usage;
     let talks;
     let dictation;
+    let course;
     try {
-      [progress, mastery, fixes, usage, talks, dictation] = await Promise.all([
+      [progress, mastery, fixes, usage, talks, dictation, course] = await Promise.all([
         Api.getProgress(),
         Api.getLearnerTopics(),
         Api.getLearnerItems({ kind: "fix" }),
         Api.getUsage().catch(() => null),
         Api.getTalks().catch(() => null),
         Api.getDictationStats().catch(() => null),
+        Api.getRoadmap().catch(() => null),
       ]);
     } catch (err) {
       container.innerHTML = `<div class="card"><p class="muted">Не удалось загрузить прогресс: ${escapeHtml(err.message)}</p></div>`;
@@ -29,13 +32,14 @@ Views.progress = (() => {
     if (!progress.sessions_analyzed && !progress.score_history.length) {
       container.innerHTML = `<div class="card"><h2>Прогресс</h2><div class="empty-state">
         Пока нет данных. Запишите и проанализируйте монолог — здесь появятся оценки, темы и банк ошибок.
-      </div></div>`;
+      </div></div>${renderCourse(course)}`;
       return;
     }
 
     const labels = {};
     mastery.topics.forEach((t) => (labels[t.key] = t.label));
     container.innerHTML = `
+      ${renderCourse(course)}
       <div class="card">
         <h2>Оценки речи</h2>
         <p class="muted">Проанализировано записей: ${progress.sessions_analyzed}. Оценки 1–10 по каждой записи.</p>
@@ -46,7 +50,7 @@ Views.progress = (() => {
       <div class="card">
         <h2>Темы</h2>
         <p class="muted">«В речи» — сколько раз тема встречалась в записях; «точность» — последние 20 ответов в упражнениях.</p>
-        ${renderTopics(mastery.topics, progress.topics)}
+        ${renderTopics(mastery, progress.topics)}
       </div>
       ${renderTalks(talks)}
       ${renderDictation(dictation)}
@@ -73,6 +77,64 @@ Views.progress = (() => {
     });
   }
 
+  // The course by level (mastered + «уже знаю» out of all), and the lessons
+  // being worked on now, so progress in the roadmap sits next to the scores.
+  function renderCourse(course) {
+    if (!course) return "";
+    const touched = course.counts.mastered + course.counts.known + course.counts.practising + course.counts.theory;
+    const inWork = course.levels
+      .flatMap((level) => level.modules.flatMap((m) => m.lessons))
+      .filter((l) => l.status === "practising" || l.status === "theory");
+    return `
+      <div class="card">
+        <div class="today-head">
+          <h2>Курс</h2>
+          <a href="#/roadmap">Открыть курс →</a>
+        </div>
+        ${
+          touched
+            ? ""
+            : `<p class="muted">Уроки ещё не начаты. Курс A2 → C1 — на вкладке «Занятия».</p>`
+        }
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Уровень</th><th>Освоено / уже знаю</th><th>В работе</th><th></th></tr></thead>
+            <tbody>${course.levels
+              .map((level) => {
+                const lessons = level.modules.flatMap((m) => m.lessons);
+                const working = lessons.filter((l) => l.status === "practising" || l.status === "theory").length;
+                return `<tr>
+                  <td>${escapeHtml(level.label)}</td>
+                  <td class="num">${level.done} из ${level.total}</td>
+                  <td class="num">${working}</td>
+                  <td><div class="progress-bar"><div style="width: ${Math.round((level.done / level.total) * 100)}%"></div></div></td>
+                </tr>`;
+              })
+              .join("")}</tbody>
+          </table>
+        </div>
+        ${
+          inWork.length
+            ? `<h3 class="area-heading">Сейчас в работе</h3>
+               <ul class="topic-list">${inWork
+                 .map(
+                   (l) => `
+                 <li class="topic-row">
+                   <div><strong>${escapeHtml(l.label)}</strong><br/>
+                     <span class="topic-meta">наборов: ${l.runs}${
+                       l.best_score != null ? `, лучший ${Math.round(l.best_score * 100)} %` : ""
+                     } · дней с ≥ ${Math.round(course.pass_score * 100)} %: ${l.passed_days} из ${course.mastery_runs}${
+                       l.spoken_tasks ? ` · устных заданий: ${l.spoken_tasks}` : ""
+                     }</span></div>
+                   <a href="#/practice/${encodeURIComponent(l.id)}"><button class="secondary">К уроку</button></a>
+                 </li>`
+                 )
+                 .join("")}</ul>`
+            : ""
+        }
+      </div>`;
+  }
+
   function renderScoreTable(history) {
     const entries = Charts.sortedHistory(history).reverse();
     if (!entries.length) return "";
@@ -95,26 +157,40 @@ Views.progress = (() => {
       </details>`;
   }
 
-  function renderTopics(rows, speechTopics) {
+  // Two levels (taxonomy v2): an area row with its totals, then its topics.
+  function renderTopics(mastery, speechTopics) {
     const speech = {};
-    speechTopics.forEach((t) => (speech[t.key] = t));
-    const shown = rows.filter((row) => row.items || row.weakness_score || row.recent_attempts);
+    speechTopics.forEach((t) => (speech[t.key] = t.count));
+    const active = (row) => row.items || row.weakness_score || row.recent_attempts;
+    const shown = mastery.topics.filter(active);
     if (!shown.length) return `<p class="muted">Темы появятся после анализа первой записи.</p>`;
+    const accuracy = (row) => (row.accuracy == null ? "—" : `${Math.round(row.accuracy * 100)}%`);
+    const cells = (row, count) => `
+                <td class="num">${count}</td>
+                <td class="num">${accuracy(row)}</td>
+                <td class="num">${row.closed_items} / ${row.items}</td>
+                <td class="num">${row.due_items}</td>`;
+    const body = mastery.areas
+      .filter(active)
+      .map((area) => {
+        const rows = shown.filter((row) => row.area === area.key);
+        const count = rows.reduce((sum, row) => sum + (speech[row.key] || 0), 0);
+        return `<tr class="area-row"><th scope="rowgroup">${escapeHtml(area.label)}</th>${cells(area, count)}</tr>
+          ${rows
+            .map(
+              (row) => `<tr>
+                <td class="topic-cell"><a href="#/practice/${encodeURIComponent(row.key)}">${escapeHtml(row.label)}</a></td>
+                ${cells(row, speech[row.key] || 0)}
+              </tr>`
+            )
+            .join("")}`;
+      })
+      .join("");
     return `
       <div class="table-wrap">
         <table class="data-table">
-          <thead><tr><th>Тема</th><th>В речи</th><th>Точность</th><th>Выучено</th><th>К повторению</th></tr></thead>
-          <tbody>${shown
-            .map(
-              (row) => `<tr>
-                <td><a href="#/practice/${encodeURIComponent(row.key)}">${escapeHtml(row.label)}</a></td>
-                <td class="num">${speech[row.key] ? speech[row.key].count : 0}</td>
-                <td class="num">${row.accuracy == null ? "—" : `${Math.round(row.accuracy * 100)}%`}</td>
-                <td class="num">${row.closed_items} / ${row.items}</td>
-                <td class="num">${row.due_items}</td>
-              </tr>`
-            )
-            .join("")}</tbody>
+          <thead><tr><th>Раздел / тема</th><th>В речи</th><th>Точность</th><th>Выучено</th><th>К повторению</th></tr></thead>
+          <tbody>${body}</tbody>
         </table>
       </div>`;
   }
