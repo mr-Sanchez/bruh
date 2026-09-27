@@ -5,8 +5,9 @@
 // model sees what the learner sees. Every chat is kept on the server; the
 // panel's «История» lists them. Only «Отправить» spends money.
 //
-// Not a view: it lives beside the router for the whole page.
-//   Assistant.open()        - the panel on its history (a future side button)
+// Not a view: it lives beside the router for the whole page. The sidebar's
+// «Ассистент» opens and closes the panel.
+//   Assistant.open()        - the panel (the open chat, or the history)
 //   Assistant.openChat(id)  - one stored chat
 const Assistant = (() => {
   // The innermost of these around a selection is its context - the smallest
@@ -127,11 +128,20 @@ const Assistant = (() => {
   function showPanel() {
     panel.hidden = false;
     document.body.classList.add("assistant-open");
+    setToggle(true);
   }
 
   function close() {
     panel.hidden = true;
     document.body.classList.remove("assistant-open");
+    setToggle(false);
+  }
+
+  function setToggle(isOpen) {
+    const toggle = document.querySelector("[data-action=assistant]");
+    if (!toggle) return;
+    toggle.classList.toggle("active", isOpen);
+    toggle.setAttribute("aria-expanded", String(isOpen));
   }
 
   async function ensureCost() {
@@ -341,6 +351,7 @@ const Assistant = (() => {
 
     panel = document.createElement("aside");
     panel.className = "assistant-panel";
+    panel.id = "assistant-panel";
     panel.hidden = true;
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", "Ассистент");
@@ -364,6 +375,9 @@ const Assistant = (() => {
       event.stopPropagation();
     });
     document.body.appendChild(panel);
+
+    const toggle = document.querySelector("[data-action=assistant]");
+    if (toggle) toggle.addEventListener("click", () => (panel.hidden ? open() : close()));
 
     document.addEventListener("mouseup", onSelectionEnd);
     document.addEventListener("keyup", (event) => {

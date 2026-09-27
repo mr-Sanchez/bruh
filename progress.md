@@ -42,7 +42,8 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
   Markdown, always Russian (≈ 0.4 ¢ for the first answer; each answer resends the chat).
   Every chat is kept in `data/assistant/` (decided with the user: «храним историю»), listed
   under «История» in the panel; a question is saved before Claude is asked. Usage kind
-  `assistant`. `Assistant.open()` is ready for the side button the user wants later.
+  `assistant`. «Ассистент» at the bottom of the sidebar opens and closes the panel (the
+  open chat, or the history) without selecting anything.
 
 - **2026-09-27 — «Перевод текста» (EN → RU).** Asked for by the user: an English text is
   either written by Claude (Sonnet 5 low, ≈ 1 ¢) in the chosen «уклон» at a size — short /

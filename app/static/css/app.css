@@ -105,6 +105,24 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; letter-spacing:
 .tabs a:hover { color: var(--text); background: color-mix(in srgb, var(--accent-weak) 50%, transparent); }
 .tabs a.active { color: var(--text); background: var(--accent-weak); font-weight: 600; }
 .tabs a.active .icon { color: var(--accent); }
+/* «Ассистент» opens the chat panel instead of a route; looks like a tab. */
+.tabs .tab-button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+}
+.tabs .tab-button:hover { color: var(--text); background: color-mix(in srgb, var(--accent-weak) 50%, transparent); filter: none; }
+.tabs .tab-button.active { color: var(--text); background: var(--accent-weak); font-weight: 600; }
+.tabs .tab-button.active .icon { color: var(--accent); }
 
 /* The content column is centred in the space right of the sidebar, so wide
    screens get even margins instead of everything hugging the left edge. */
@@ -1034,7 +1052,8 @@ a.activity:hover { border-color: var(--plum-border); color: var(--text); }
   }
   .brand { padding: 0; font-size: 16px; }
   .tabs { flex-direction: row; gap: 2px; }
-  .tabs a { padding: 10px; gap: 0; }
+  .tabs a, .tabs .tab-button { padding: 10px; gap: 0; margin-top: 0; }
+  .tabs .tab-button span,
   .tabs a span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .app { padding: 20px 16px 60px; }
   .page-title { font-size: 1.75rem; }
