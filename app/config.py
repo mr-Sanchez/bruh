@@ -212,6 +212,12 @@ ROADMAP_MARKS_FILENAME: Final[str] = "roadmap_marks.jsonl"
 # on different days (decided 2026-09-26, a first guess).
 LESSON_MASTERY_RUNS: Final[int] = 2
 
+# --- Irregular verbs ----------------------------------------------------------
+# Every checked verb of the free drill: append-only, AUTHORITATIVE like
+# attempts.jsonl (the learner's answers cannot be rebuilt). Kept out of the
+# learner model, like dictation; counts for the day streak.
+IRREGULAR_VERBS_FILENAME: Final[str] = "irregular_verbs.jsonl"
+
 # --- «Сегодня» daily workout (Stage 3) -----------------------------------
 # The workout aims at ~10 minutes: cards, one live activity, dictation.
 # Cards past WORKOUT_MAX_CARDS stay in the queue and can be done on «Занятия».

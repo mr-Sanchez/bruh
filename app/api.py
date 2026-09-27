@@ -35,6 +35,7 @@ from app import (
     dictation,
     dictation_store,
     exercise_sets,
+    irregular_verbs,
     learner_model,
     learner_store,
     module_test,
@@ -43,6 +44,7 @@ from app import (
     theme_store,
     themes,
     utils,
+    verb_store,
 )
 from app.analyzer import (
     ANALYSIS_SCHEMA_VERSION,
@@ -1453,6 +1455,48 @@ def delete_lesson(lesson_id: str) -> Dict[str, Any]:
 def get_dictation_stats() -> Dict[str, Any]:
     """Cross-lesson numbers and the «сложные слова» list for «Прогресс»."""
     return dictation_store.stats()
+
+
+# ----------------------------------------------------- /irregular-verbs
+# The irregular-verb table and its drill: free, no Claude - a typed form is
+# checked by exact matching against the accepted spellings, on the server.
+@router.get("/irregular-verbs")
+def get_irregular_verbs() -> Dict[str, Any]:
+    """The whole table in frequency order, each verb with its drill stats."""
+    stats = verb_store.stats()
+    return {
+        "verbs": [
+            {**irregular_verbs.verb_payload(verb), "stats": stats.get(verb.key)}
+            for verb in irregular_verbs.VERBS
+        ],
+        "summary": irregular_verbs.summary(stats),
+    }
+
+
+@router.get("/irregular-verbs/drill")
+def get_irregular_verb_drill(count: int = 10) -> Dict[str, Any]:
+    """`count` verbs to drill: last mistakes, then new ones from the top, then reviews."""
+    if count < 1:
+        raise HTTPException(status_code=400, detail="count must be at least 1.")
+    picked = irregular_verbs.pick(verb_store.stats(), count)
+    # Only the prompt: the forms come back with the check.
+    return {"verbs": [{"key": v.key, "translation": v.translation} for v in picked]}
+
+
+class VerbCheckRequest(BaseModel):
+    verb: str = Field(min_length=1, max_length=40)
+    answers: List[str] = Field(min_length=3, max_length=3)
+
+
+@router.post("/irregular-verbs/check", status_code=201)
+def check_irregular_verb(body: VerbCheckRequest) -> Dict[str, Any]:
+    """Grade the three typed forms and log the result (append-only)."""
+    verb = irregular_verbs.lookup(body.verb)
+    if verb is None:
+        raise HTTPException(status_code=404, detail="Unknown verb.")
+    graded = irregular_verbs.grade(verb, [answer[:80] for answer in body.answers])
+    verb_store.append_result(graded)
+    return {**graded, "stats": verb_store.stats().get(verb.key)}
 
 
 # ------------------------------------------------------ /practice/sets

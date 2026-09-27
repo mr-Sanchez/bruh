@@ -17,6 +17,7 @@
     roadmap: "practice",
     speak: "practice",
     moduletest: "practice",
+    verbs: "practice",
     history: "history",
     session: "history",
     progress: "progress",

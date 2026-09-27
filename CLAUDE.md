@@ -39,11 +39,13 @@ app/dictation.py        pure: WebVTT parsing, sentences, word checking, translat
 app/learner_model.py    pure: item bank, Leitner state, topic mastery
 app/module_test.py      pure: a module entry test - assemble, hide answers, grade
 app/roadmap.py          pure: roadmap lesson statuses, «Продолжить»
+app/irregular_verbs.py  pure data + rules: irregular verbs by frequency, grading, drill pick
 app/youtube.py          the only place that talks to YouTube (yt-dlp)
 app/dictation_store.py  the ONLY reader/writer of dictation lessons
 app/learner_store.py    the ONLY reader/writer of learner-model files; usage/cost log
 app/progress_store.py   topic aggregation + score history → data/progress.json
 app/theme_store.py      the ONLY reader/writer of data/themes.json (own contexts, last used)
+app/verb_store.py       the ONLY reader/writer of data/irregular_verbs.jsonl
 app/static/js/          app.js (hash router), api.js, drill.js, recorder.js (shared by every
                         spoken activity), themes.js (the «уклон» picker), charts.js,
                         icons.js, translation.js, views/*.js
@@ -66,6 +68,7 @@ data/usage.jsonl                   append-only — tokens/minutes + cost per pai
 data/card_verdicts.jsonl           append-only cache of Claude's card checks
 data/roadmap_marks.jsonl           AUTHORITATIVE, append-only — «уже знаю» / «пропустить»
 data/word_picks.jsonl              AUTHORITATIVE, append-only — words picked as word cards
+data/irregular_verbs.jsonl         AUTHORITATIVE, append-only — every checked irregular verb
 data/themes.json                   own contexts, last used, Claude-written prompts (paid)
 data/practice/<set-id>.json        AI sets + runs + verdicts; paid, NOT rebuildable
 data/theory/<lesson>.json          every version of a lesson's theory; paid, NOT rebuildable
@@ -122,6 +125,8 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
   Deepgram. Audio stored as served (no FFmpeg); sentences shown as the captions spell them.
 * **Dictation is free; only its translation task calls Claude** (the split is a Haiku call,
   2026-09-26; the review is Sonnet 5 low since 2026-09-27). Usage kinds `dictation_split` / `dictation_translation`.
+* **Irregular verbs are free and stay out of the learner model** (2026-09-27): graded by exact
+  match on the server, logged only to `irregular_verbs.jsonl`; they count for the streak.
 * **Dictation stays out of the learner model** — results and translation mistakes live only in
   the lesson dir, never `attempts.jsonl` / item bank. They surface as «сложные слова» and count
   for the streak and the daily workout.

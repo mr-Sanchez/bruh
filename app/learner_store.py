@@ -32,7 +32,8 @@ Spoken drills (talk, shadowing) are ordinary recordings; their results are
 derived on read from deepgram_response.json and logged as topic attempts.
 Dictation is the exception: it keeps its own files (app.dictation_store) and
 writes no attempts at all, but its finished sentences still feed the daily
-workout, the day streak and the history shown here.
+workout, the day streak and the history shown here. The irregular-verb drill
+(app.verb_store) is the same kind of exception; it only feeds the streak.
 
 The rules themselves (item identity, Leitner, topic mastery) live in
 app.learner_model as pure functions.
@@ -58,6 +59,7 @@ from app import (
     speech_drills,
     theme_store,
     utils,
+    verb_store,
 )
 
 logger = logging.getLogger(__name__)
@@ -1243,6 +1245,8 @@ def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
     active_days |= {s.started_at.date() for s in recorded}
     # A dictated sentence is practice too: it keeps the streak alive.
     active_days |= dictation_store.active_days()
+    # So is a checked irregular verb.
+    active_days |= verb_store.active_days()
     return {
         "today": today.isoformat(),
         "steps": steps,

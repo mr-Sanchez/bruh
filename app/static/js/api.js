@@ -181,6 +181,15 @@ const Api = (() => {
         body: JSON.stringify(result),
       }),
     getDictationStats: () => request("/api/dictation/stats"),
+    // Irregular verbs (free): the table, a drill's verbs, one checked verb (logged).
+    getIrregularVerbs: () => request("/api/irregular-verbs"),
+    getIrregularVerbDrill: (count) => request(`/api/irregular-verbs/drill?count=${count}`),
+    checkIrregularVerb: (verb, answers) =>
+      request("/api/irregular-verbs/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verb, answers }),
+      }),
     // The translation task after a dictation: two explicit calls (Haiku splits, Sonnet reviews).
     splitLesson: (id) =>
       request(`/api/dictation/lessons/${encodeURIComponent(id)}/parts`, { method: "POST" }),

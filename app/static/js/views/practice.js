@@ -93,6 +93,11 @@ Views.practice = (() => {
             <span><strong>Диктант</strong><br/>
               <span class="topic-meta">Видео с YouTube: набрать на слух по субтитрам · бесплатно</span></span>
           </a>
+          <a class="activity" href="#/verbs">
+            <span class="activity-icon tone-orange">${Icons.keyboard}</span>
+            <span><strong>Неправильные глаголы</strong><br/>
+              <span class="topic-meta">Таблица по частоте и тренировка: перевод → три формы · без Claude</span></span>
+          </a>
           <a class="activity" href="#/shadowing">
             <span class="activity-icon tone-plum">${Icons.speak}</span>
             <span><strong>Shadowing</strong><br/>

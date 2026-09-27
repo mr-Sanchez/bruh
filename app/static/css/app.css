@@ -858,6 +858,28 @@ a.activity:hover { border-color: var(--plum-border); color: var(--text); }
   .today-aside { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 }
 
+/* --- irregular verbs --------------------------------------------------------- */
+.verb-modes { margin: 14px 0 18px; }
+.verb-search { width: 100%; max-width: 420px; }
+.verb-table { width: 100%; border-collapse: collapse; font-size: 0.95rem; margin-top: 12px; }
+.verb-table th { text-align: left; font-weight: 600; color: var(--text-muted); font-size: 0.82rem; }
+.verb-table th, .verb-table td { padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.verb-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.verb-table .verb-form { font-weight: 600; white-space: nowrap; }
+.verb-mark { color: var(--text-muted); }
+.verb-mark.is-learned { color: var(--success); }
+.verb-mark.is-wrong { color: var(--danger); font-weight: 700; }
+.verb-inputs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.verb-inputs input { width: 100%; font-size: 1.05rem; }
+.verb-inputs input.is-correct { border-color: var(--success); color: var(--success); }
+.verb-inputs input.is-wrong { border-color: var(--danger); color: var(--danger); }
+.verb-expected { display: block; min-height: 1.3em; margin-top: 4px; color: var(--success); font-weight: 600; font-size: 0.95rem; }
+.verb-mistakes { padding-left: 18px; line-height: 1.7; }
+@media (max-width: 640px) {
+  .verb-inputs { grid-template-columns: 1fr; }
+  .verb-table .verb-form { white-space: normal; }
+}
+
 @media (max-width: 760px) {
   .shell { flex-direction: column; }
   .sidebar {
