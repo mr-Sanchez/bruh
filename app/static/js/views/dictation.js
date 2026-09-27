@@ -221,10 +221,10 @@ Views.dictation = (() => {
         <audio data-role="audio" preload="metadata"
           src="/api/dictation/lessons/${encodeURIComponent(lesson.id)}/audio"></audio>
         <div class="dictation-controls">
-          <button data-role="play">▶︎ Слушать</button>
-          <button class="secondary" data-role="hold" aria-live="polite">⏸ Пауза</button>
-          <button class="secondary" data-role="prev">◀ Пред.</button>
-          <button class="secondary" data-role="next">След. ▶</button>
+          <button data-role="play">▶︎ Слушать${keyHint("Enter")}</button>
+          <button class="secondary" data-role="hold"><span aria-live="polite">⏸ Пауза</span>${keyHint("Esc")}</button>
+          <button class="secondary" data-role="prev">◀ Пред.${keyHint("[")}</button>
+          <button class="secondary" data-role="next">След. ▶${keyHint("]")}</button>
           <label>Скорость
             <select data-role="speed">
               ${SPEEDS.map((s) => `<option value="${s}" ${s === prefs.speed ? "selected" : ""}>${s}×</option>`).join("")}
@@ -248,9 +248,8 @@ Views.dictation = (() => {
         </div>
         <div class="dictation-line" data-role="line"></div>
         <p class="dictation-verdict muted" data-role="verdict" aria-live="polite"></p>
-        <p class="muted dictation-help">Enter — слушать снова · Esc — пауза / продолжить ·
-          Space — следующее слово ·
-          Tab — подсказка · Backspace в пустом поле — назад · [ и ] — соседние предложения</p>
+        <p class="muted dictation-help">Space — следующее слово · Tab — подсказка ·
+          Backspace в пустом поле — назад · [ и ] — в пустом поле</p>
       </div>
       <div class="card" data-role="translation"></div>`;
 
@@ -427,7 +426,7 @@ Views.dictation = (() => {
     // «Пауза» while it plays (or waits to repeat), «Продолжить» otherwise.
     function refreshHold() {
       const active = !audio.paused || repeatTimer !== null;
-      holdButton.textContent = active ? "⏸ Пауза" : "▶︎ Продолжить";
+      holdButton.firstElementChild.textContent = active ? "⏸ Пауза" : "▶︎ Продолжить";
     }
 
     // `timeupdate` only fires ~4 times a second, so the end of the sentence is

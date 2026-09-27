@@ -34,6 +34,7 @@ app/analyzer.py         Claude: monologue / picture analysis, topic tagging
 app/exercise_sets.py    Claude: AI exercise sets (generate + grade: Sonnet 5 low)
 app/dictation_translation.py  Claude: cut a lesson into parts (Haiku), review a translation (Sonnet)
 app/theory.py           Claude: a roadmap lesson's theory (Sonnet 5 low)
+app/text_translation.py Claude: «Перевод текста» - write a text, review a translation (Sonnet)
 app/speech_drills.py    pure: pace, fillers, pauses, shadowing alignment from word timings
 app/dictation.py        pure: WebVTT parsing, sentences, word checking, translation parts
 app/learner_model.py    pure: item bank, Leitner state, topic mastery
@@ -46,6 +47,7 @@ app/learner_store.py    the ONLY reader/writer of learner-model files; usage/cos
 app/progress_store.py   topic aggregation + score history → data/progress.json
 app/theme_store.py      the ONLY reader/writer of data/themes.json (own contexts, last used)
 app/verb_store.py       the ONLY reader/writer of data/irregular_verbs.jsonl
+app/text_store.py       the ONLY reader/writer of data/translate/ (texts + reviews)
 app/static/js/          app.js (hash router), api.js, drill.js, recorder.js (shared by every
                         spoken activity), themes.js (the «уклон» picker), charts.js,
                         icons.js, translation.js, views/*.js
@@ -74,6 +76,8 @@ data/practice/<set-id>.json        AI sets + runs + verdicts; paid, NOT rebuilda
 data/theory/<lesson>.json          every version of a lesson's theory; paid, NOT rebuildable
 data/lesson_tasks/<lesson>.json    spoken tasks Claude wrote for a lesson; paid, append-only
 data/module_tests/<module>.json    module entry tests + every run; paid, append-only
+data/translate/<text-id>.json      a text to translate (Claude's or pasted) + every
+                                   translation with its review; paid, NOT rebuildable
 data/dictation/<video-id>/         lesson.json, audio.<ext>, subtitles.vtt, parts.json,
                                    results.jsonl (AUTHORITATIVE), translations.jsonl (paid)
 logs/app.log                       rotating, 1 MB × 4
@@ -95,6 +99,12 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
   `lesson_task` attempt per take.
 * **Spoken drills** (`kind=talk` / `kind=shadowing`, details in `session.json`'s `drill`):
   measured, not analysed; one `filler_words_fluency` attempt is logged, `/analyze` refuses them.
+* **Text translation** (`#/translate`): `POST /api/translate/texts` (Claude writes an English
+  text in a «уклон» at a size of 5/10/15 min) or `.../texts/custom` (pasted, free) →
+  `POST .../<id>/review` (Sonnet: accuracy, mistakes, unnatural spots, final version, phrases;
+  text saved before Claude is asked, same text reuses the review) → `PUT .../<id>/phrases`
+  picks word cards through the shared `word_picks.jsonl` (`set_id` = the text id). Stays out
+  of `attempts.jsonl`; the translation can be dictated (`/api/learner/dictate`, `language=ru`).
 * **Dictation:** `POST /api/dictation/lessons` (YouTube link) → background yt-dlp import →
   poll until `ready`/`error`. Each sentence is posted to `.../results` and graded **again**
   server-side. Afterwards an optional translation task: `POST .../parts`, then

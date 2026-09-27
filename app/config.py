@@ -437,6 +437,41 @@ LESSON_PARTS_FILENAME: Final[str] = "parts.json"
 # Append-only like results.jsonl: every submitted translation with its review.
 LESSON_TRANSLATIONS_FILENAME: Final[str] = "translations.jsonl"
 
+# --- Text translation (2026-09-27, a few cents per text) -----------------
+# «Перевод текста»: an English text - written by Claude in a context
+# («уклон») at a chosen size, or pasted by the learner - is translated into
+# Russian (typed or dictated) and reviewed by Sonnet on a click: accuracy,
+# mistakes, unnatural spots, a final version, and useful phrases the learner
+# may pick as word cards. Both calls are explicit and kept on disk.
+TEXT_WRITE_MODEL: Final[str] = "claude-sonnet-5"
+TEXT_WRITE_EFFORT: Final[str] = "low"
+TEXT_WRITE_MAX_TOKENS: Final[int] = 6_000
+TEXT_REVIEW_MODEL: Final[str] = "claude-sonnet-5"
+TEXT_REVIEW_EFFORT: Final[str] = "low"
+TEXT_REVIEW_MAX_TOKENS: Final[int] = 12_000
+# A generated text takes 5-15 minutes to translate (the user's brief): size
+# key -> (label, minutes, words). About 17-20 words a minute for a written
+# EN -> RU translation.
+TEXT_SIZES: Final[dict] = {
+    "short": ("Короткий", 5, (80, 110)),
+    "medium": ("Средний", 10, (160, 200)),
+    "long": ("Длинный", 15, (240, 290)),
+}
+TEXT_DEFAULT_SIZE: Final[str] = "medium"
+TEXT_WORDS_PER_MINUTE: Final[int] = 18
+# A pasted text: long enough to be a text, short enough for one review.
+TEXT_CUSTOM_MIN_CHARS: Final[int] = 20
+TEXT_CUSTOM_MAX_CHARS: Final[int] = 4_000
+TEXT_TRANSLATION_MAX_CHARS: Final[int] = 8_000
+# Useful phrases the review suggests as word cards (the learner picks).
+TEXT_PHRASES: Final[int] = 8
+# Earlier titles in the same context, so a new text is about something else.
+TEXT_AVOID_TITLES: Final[int] = 20
+# Shown next to the buttons until the usage log has real averages.
+TEXT_WRITE_COST_ESTIMATE_USD: Final[float] = 0.01
+TEXT_REVIEW_COST_ESTIMATE_USD: Final[float] = 0.03
+TEXTS_DIRNAME: Final[str] = "translate"
+
 # --- Pricing (estimates for the usage log, USD) --------------------------
 # Per million tokens: (input, output). Cache writes bill at 1.25x input,
 # cache reads at 0.1x input. Unknown models are logged with cost_usd = None.
@@ -522,6 +557,11 @@ def module_tests_dir() -> Path:
 def dictation_dir() -> Path:
     """Dictation lessons (data/dictation/<video id>/: audio, subtitles, results)."""
     return data_dir() / DICTATION_DIRNAME
+
+
+def texts_dir() -> Path:
+    """Texts to translate with every translation and review (data/translate/<id>.json)."""
+    return data_dir() / TEXTS_DIRNAME
 
 
 def load_environment() -> None:

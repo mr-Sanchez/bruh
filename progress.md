@@ -33,6 +33,21 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
 
 ## Done
 
+- **2026-09-27 — «Перевод текста» (EN → RU).** Asked for by the user: an English text is
+  either written by Claude (Sonnet 5 low, ≈ 1 ¢) in the chosen «уклон» at a size — short /
+  medium / long ≈ 5 / 10 / 15 minutes of translating (80–110 / 160–200 / 240–290 words) — and
+  level A2–C1, or pasted by the learner (free). The text sits beside the translation field;
+  the translation is typed or dictated in Russian (`/api/learner/dictate` with `language=ru`,
+  up to 120 s per clip, appended; usage `text_dictation`). «Проверить» → one Sonnet call
+  (≈ 3 ¢): accuracy 0–100 + summary, mistakes by kind (grammar, meaning, omission, addition,
+  word choice, spelling) with the fix, «звучит неестественно» with a native alternative, a
+  final translation that keeps the learner's good wording, and 8 useful phrases of the text
+  that the learner ticks into RU → EN word cards (same pick log and card kind as a set's
+  vocabulary). Files in `data/translate/` (paid, append-only attempts); the same text is never
+  reviewed twice; a failed call keeps the translation. Not in the learner model, the streak or
+  «Сегодня» («больше ничего» — the user). The direction is stored (`en-ru`) so RU → EN can be
+  added later. **Still to check:** text and review quality and the real cost on the API.
+
 - **2026-09-27 — A translation card's answer can be dictated.** «Надиктовать» under the
   answer field records up to 60 s (the shared `Recorder`), `POST /api/learner/dictate` sends
   the clip to Deepgram (English profile with `filler_words` off — it is an answer, not a

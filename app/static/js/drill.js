@@ -84,13 +84,14 @@ const Drill = (() => {
   }
 
   // Replaces the [data-role="buttons"] row with [label, className, handler]
-  // buttons and focuses the first, so Enter moves the drill on.
+  // buttons and focuses the first, so Enter moves the drill on (it says so).
   function setButtons(container, list) {
     const row = container.querySelector('[data-role="buttons"]');
     row.innerHTML = "";
-    list.forEach(([label, cls, handler]) => {
+    list.forEach(([label, cls, handler], i) => {
       const button = document.createElement("button");
       button.textContent = label;
+      if (i === 0) button.insertAdjacentHTML("beforeend", keyHint("Enter"));
       if (cls) button.className = cls;
       button.addEventListener("click", handler);
       row.appendChild(button);
@@ -164,8 +165,8 @@ const Drill = (() => {
     if (ex.type !== "translate") return textarea;
     return `${textarea}
       <div class="dictate-row">
-        <button type="button" class="secondary dictate-button" data-role="dictate">${Icons.svg("mic", 18)}<span>Надиктовать</span></button>
-        <span class="muted" data-role="dictate-status">R — надиктовать и стоп, Enter — проверить</span>
+        <button type="button" class="secondary dictate-button" data-role="dictate">${Icons.svg("mic", 18)}<span>Надиктовать</span>${keyHint("R")}</button>
+        <span class="muted" data-role="dictate-status"></span>
       </div>`;
   }
 
@@ -174,7 +175,16 @@ const Drill = (() => {
   // still be corrected before «Проверить». Keys, while no text field has the
   // focus: R starts and stops (by key position, so a Russian layout works too),
   // Enter calls onEnter; Esc leaves the field. Returns a stop() for the caller.
-  function wireDictation(container, input, { onEnter } = {}) {
+  // `language` "ru" dictates a Russian text translation («Перевод текста»),
+  // with its own length limit and hint after the text lands; onText() follows
+  // every text that lands in the field.
+  function wireDictation(
+    container,
+    input,
+    { onEnter, onText, language = "en", maxSeconds = DICTATION_MAX_SECONDS, doneHint } = {}
+  ) {
+    const spoken = language === "ru" ? "по-русски" : "по-английски";
+    const after = doneHint || "Проверьте текст и нажмите «Проверить» (Enter) или R, чтобы добавить.";
     const button = container.querySelector('[data-role="dictate"]');
     const status = container.querySelector('[data-role="dictate-status"]');
     const label = button.querySelector("span");
@@ -193,12 +203,13 @@ const Drill = (() => {
       button.disabled = true;
       status.textContent = "Распознаём…";
       try {
-        const { text } = await Api.dictate(blob, durationSeconds);
+        const { text } = await Api.dictate(blob, durationSeconds, language);
         if (!text) {
           status.textContent = "Ничего не расслышали. Попробуйте ещё раз.";
         } else {
           input.value = input.value.trim() ? `${input.value.trim()} ${text}` : text;
-          status.textContent = "Проверьте текст и нажмите «Проверить» (Enter) или R, чтобы добавить.";
+          if (onText) onText();
+          status.textContent = after;
         }
       } catch (err) {
         status.textContent = `Не удалось распознать: ${err.message}`;
@@ -211,7 +222,7 @@ const Drill = (() => {
         return;
       }
       recorder = Recorder.create({
-        maxSeconds: DICTATION_MAX_SECONDS,
+        maxSeconds,
         onTick: (elapsed) => {
           label.textContent = `Стоп · ${Math.floor(elapsed)} с`;
         },
@@ -225,7 +236,7 @@ const Drill = (() => {
         return;
       }
       button.classList.add("recording");
-      status.textContent = `Говорите по-английски (до ${DICTATION_MAX_SECONDS} с). Стоп — R.`;
+      status.textContent = `Говорите ${spoken} (до ${maxSeconds} с). Стоп — R.`;
     };
     button.addEventListener("click", toggle);
     const onKey = (event) => {
@@ -699,71 +710,85 @@ const Drill = (() => {
       showVocabulary(container.querySelector('[data-role="vocabulary"]'), picked || [], perDay);
     }
 
-    // The set's useful words and phrases: the learner ticks which become
-    // Russian -> English word cards. Saving sends the whole choice, so an
-    // unticked entry that was a card stops being one. Sets written before
-    // vocabulary existed have none, and the block stays empty.
+    // The set's useful words and phrases (sets written before vocabulary
+    // existed have none, and the block stays empty).
     function showVocabulary(host, picked, perDay) {
-      const vocabulary = exerciseSet.vocabulary || [];
-      if (!vocabulary.length) return;
-      let saved = new Set(picked);
-      host.innerHTML = `
-        <div class="vocab-block">
-          <h3>Полезные слова и фразы</h3>
-          <p class="muted">Отметьте, что хотите учить: карточка покажет русский, вы вспоминаете английский.
-            ${perDay ? `Новых слов в день — не больше ${perDay}, остальные подождут.` : ""}</p>
-          <ul class="vocab-list">${vocabulary
-            .map(
-              (v) => `
-            <li>
-              <label class="vocab-row">
-                <input type="checkbox" value="${escapeHtml(v.id)}"${saved.has(v.id) ? " checked" : ""} />
-                <span>
-                  <span class="phrase">${escapeHtml(v.english)}</span>
-                  <span class="muted">— ${escapeHtml(v.russian)}</span>
-                  ${v.example ? `<span class="phrase-example">${escapeHtml(v.example)}</span>` : ""}
-                  ${v.note ? `<span class="word-note">${escapeHtml(v.note)}</span>` : ""}
-                </span>
-              </label>
-            </li>`
-            )
-            .join("")}</ul>
-          <div class="button-row">
-            <button class="secondary" data-role="save-words">Сохранить в карточки</button>
-            <span class="muted" data-role="words-status"></span>
-          </div>
-        </div>`;
-      const boxes = [...host.querySelectorAll('input[type="checkbox"]')];
-      const save = host.querySelector('[data-role="save-words"]');
-      const status = host.querySelector('[data-role="words-status"]');
-      const chosen = () => boxes.filter((b) => b.checked).map((b) => b.value);
-      const refresh = () => {
-        const now = chosen();
-        const changed = now.length !== saved.size || now.some((id) => !saved.has(id));
-        save.disabled = !changed;
-        if (changed) status.textContent = "";
-      };
-      boxes.forEach((b) => b.addEventListener("change", refresh));
-      save.addEventListener("click", async () => {
-        save.disabled = true;
-        status.textContent = "Сохраняем…";
-        try {
-          const result = await Api.saveWordPicks(exerciseSet.id, chosen());
-          saved = new Set(result.picked);
-          const parts = [];
-          if (result.added) parts.push(`добавлено: ${result.added}`);
-          if (result.removed) parts.push(`убрано: ${result.removed}`);
-          status.textContent = `Сохранено${parts.length ? ` — ${parts.join(", ")}` : ""}. В карточках из этого набора: ${saved.size}.`;
-        } catch (err) {
-          status.textContent = `Не удалось сохранить: ${err.message}`;
-        }
-        refresh();
+      vocabularyPicker(host, {
+        vocabulary: exerciseSet.vocabulary || [],
+        picked,
+        perDay,
+        save: (chosen) => Api.saveWordPicks(exerciseSet.id, chosen),
+        sourceLabel: "из этого набора",
       });
-      refresh();
     }
 
     show();
   }
 
-  return { runCards, runSet, normalize, matches, wordDiff };
+  // Useful words and phrases the learner ticks to become Russian -> English
+  // word cards (an AI set's vocabulary, a translated text's phrases). Saving
+  // sends the whole choice through `save(ids)`, so an unticked entry that was
+  // a card stops being one.
+  function vocabularyPicker(host, { vocabulary, picked, perDay, save: saveChoice, sourceLabel }) {
+    if (!vocabulary.length) {
+      host.innerHTML = "";
+      return;
+    }
+    let saved = new Set(picked);
+    host.innerHTML = `
+      <div class="vocab-block">
+        <h3>Полезные слова и фразы</h3>
+        <p class="muted">Отметьте, что хотите учить: карточка покажет русский, вы вспоминаете английский.
+          ${perDay ? `Новых слов в день — не больше ${perDay}, остальные подождут.` : ""}</p>
+        <ul class="vocab-list">${vocabulary
+          .map(
+            (v) => `
+          <li>
+            <label class="vocab-row">
+              <input type="checkbox" value="${escapeHtml(v.id)}"${saved.has(v.id) ? " checked" : ""} />
+              <span>
+                <span class="phrase">${escapeHtml(v.english)}</span>
+                <span class="muted">— ${escapeHtml(v.russian)}</span>
+                ${v.example ? `<span class="phrase-example">${escapeHtml(v.example)}</span>` : ""}
+                ${v.note ? `<span class="word-note">${escapeHtml(v.note)}</span>` : ""}
+              </span>
+            </label>
+          </li>`
+          )
+          .join("")}</ul>
+        <div class="button-row">
+          <button class="secondary" data-role="save-words">Сохранить в карточки</button>
+          <span class="muted" data-role="words-status"></span>
+        </div>
+      </div>`;
+    const boxes = [...host.querySelectorAll('input[type="checkbox"]')];
+    const button = host.querySelector('[data-role="save-words"]');
+    const status = host.querySelector('[data-role="words-status"]');
+    const chosen = () => boxes.filter((b) => b.checked).map((b) => b.value);
+    const refresh = () => {
+      const now = chosen();
+      const changed = now.length !== saved.size || now.some((id) => !saved.has(id));
+      button.disabled = !changed;
+      if (changed) status.textContent = "";
+    };
+    boxes.forEach((b) => b.addEventListener("change", refresh));
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      status.textContent = "Сохраняем…";
+      try {
+        const result = await saveChoice(chosen());
+        saved = new Set(result.picked);
+        const parts = [];
+        if (result.added) parts.push(`добавлено: ${result.added}`);
+        if (result.removed) parts.push(`убрано: ${result.removed}`);
+        status.textContent = `Сохранено${parts.length ? ` — ${parts.join(", ")}` : ""}. В карточках ${sourceLabel}: ${saved.size}.`;
+      } catch (err) {
+        status.textContent = `Не удалось сохранить: ${err.message}`;
+      }
+      refresh();
+    });
+    refresh();
+  }
+
+  return { runCards, runSet, normalize, matches, wordDiff, wireDictation, vocabularyPicker };
 })();

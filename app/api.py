@@ -41,6 +41,8 @@ from app import (
     module_test,
     progress_store,
     speech_drills,
+    text_store,
+    text_translation,
     theme_store,
     themes,
     utils,
@@ -55,6 +57,7 @@ from app.analyzer import (
 )
 from app.dictation_translation import LessonTranslator
 from app.exercise_sets import ExerciseSetGenerator, TranslationAnswer
+from app.text_translation import TextTranslator
 from app.theory import TheoryWriter, own_mistakes_from_items
 from app.transcriber import DeepgramTranscriber, MissingApiKeyError, TranscriptionError
 from app.utils import Session
@@ -76,6 +79,7 @@ GeneratorFactory = Callable[[], ExerciseSetGenerator]
 FetcherFactory = Callable[[], YouTubeFetcher]
 TranslatorFactory = Callable[[], LessonTranslator]
 TheoryWriterFactory = Callable[[], TheoryWriter]
+TextTranslatorFactory = Callable[[], TextTranslator]
 
 
 # ------------------------------------------------------------- dependencies
@@ -123,6 +127,15 @@ def get_translator_factory() -> TranslatorFactory:
 
     def factory() -> LessonTranslator:
         return LessonTranslator(config.get_anthropic_api_key())
+
+    return factory
+
+
+def get_text_translator_factory() -> TextTranslatorFactory:
+    """Claude for «Перевод текста» (Sonnet writes texts and reviews translations)."""
+
+    def factory() -> TextTranslator:
+        return TextTranslator(config.get_anthropic_api_key())
 
     return factory
 
@@ -1145,13 +1158,16 @@ def check_card(
 async def dictate_card_answer(
     audio: UploadFile = File(...),
     duration_seconds: float = Form(0.0),
+    language: Literal["en", "ru"] = Form("en"),
     transcriber_factory: TranscriberFactory = Depends(get_transcriber_factory),
 ) -> Dict[str, Any]:
-    """A spoken card answer -> text for the answer field (Deepgram, English).
+    """A spoken answer -> text for the answer field (Deepgram).
 
-    The learner can still edit the text before «Проверить»; the check itself
-    is the usual one. The clip is not saved: it is an answer, like typed text,
-    not a recording for «История». Deepgram's time is logged as usual.
+    English for a card's answer; Russian for a text translation («Перевод
+    текста», `language=ru`). The learner can still edit the text before
+    «Проверить»; the check itself is the usual one. The clip is not saved: it
+    is an answer, like typed text, not a recording for «История». Deepgram's
+    time is logged as usual.
     """
     data = await audio.read(config.CARD_DICTATION_MAX_BYTES + 1)
     if not data:
@@ -1160,7 +1176,8 @@ async def dictate_card_answer(
         raise HTTPException(status_code=400, detail="Запись слишком длинная.")
     # No filler words: "uh, I have" is not what the learner means to answer.
     profile = dataclasses.replace(
-        config.profile_by_key(config.DEFAULT_LANGUAGE_KEY), filler_words=False
+        config.profile_by_key("ru" if language == "ru" else config.DEFAULT_LANGUAGE_KEY),
+        filler_words=False,
     )
     transcriber = transcriber_factory(profile)
     try:
@@ -1170,7 +1187,8 @@ async def dictate_card_answer(
     except TranscriptionError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     audio_seconds = result.audio_duration or duration_seconds
-    usage = learner_store.record_deepgram_usage("card_dictation", profile.key, audio_seconds)
+    purpose = "text_dictation" if language == "ru" else "card_dictation"
+    usage = learner_store.record_deepgram_usage(purpose, profile.key, audio_seconds)
     return {"text": result.transcript.strip(), "cost_usd": usage["cost_usd"]}
 
 
@@ -1759,5 +1777,211 @@ def put_set_word_picks(set_id: str, body: WordPicksRequest) -> Dict[str, Any]:
     _set_or_404(set_id)
     try:
         return learner_store.set_word_picks(set_id, list(dict.fromkeys(body.picked)))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# -------------------------------------------------------------- /translate
+# «Перевод текста» (2026-09-27): an English text to translate into Russian -
+# written by Claude (a paid click) or pasted (free) - and a Sonnet review of
+# each translation (a paid click; the same text is never paid for twice).
+class CreateTextRequest(BaseModel):
+    size: Literal["short", "medium", "long"] = "medium"
+    level: Literal["a2", "b1", "b2", "c1"] = "b1"
+    theme: Optional[ThemeChoice] = None
+
+
+class CustomTextRequest(BaseModel):
+    text: str = Field(max_length=config.TEXT_CUSTOM_MAX_CHARS)
+    title: str = Field(default="", max_length=120)
+
+
+class TextReviewRequest(BaseModel):
+    translation: str = Field(max_length=config.TEXT_TRANSLATION_MAX_CHARS)
+
+
+class TextPhrasesRequest(BaseModel):
+    """The text's phrase ids that should be word cards - the whole choice,
+    so unticking a phrase takes its card away."""
+
+    picked: List[str] = Field(max_length=100)
+
+
+def _text_or_404(text_id: str) -> Dict[str, Any]:
+    # The id becomes a file name: only the exact generated shape is accepted.
+    if not re.fullmatch(text_store.ID_PATTERN, text_id):
+        raise HTTPException(status_code=400, detail="Invalid text id.")
+    document = text_store.load_text(text_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Unknown text.")
+    return document
+
+
+def _text_costs() -> Dict[str, float]:
+    return {
+        "write_usd": learner_store.average_claude_cost(
+            "translate_text", config.TEXT_WRITE_COST_ESTIMATE_USD
+        ),
+        "review_usd": learner_store.average_claude_cost(
+            "translate_review", config.TEXT_REVIEW_COST_ESTIMATE_USD
+        ),
+    }
+
+
+def _text_payload(document: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        **document,
+        "picked": learner_store.picked_vocabulary(document["id"]),
+        "words_per_day": config.NEW_WORDS_PER_DAY,
+        "costs": _text_costs(),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+def _new_text(*, origin: str, title: str, text: str, extra: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "schema_version": text_store.SCHEMA_VERSION,
+        "id": text_store.new_text_id(),
+        "direction": text_translation.DIRECTION_EN_RU,
+        "origin": origin,
+        "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "title": title,
+        "text": text,
+        "words": text_translation.word_count(text),
+        "minutes": text_translation.minutes_for(text),
+        **extra,
+        "attempts": [],
+    }
+
+
+@router.get("/translate/texts")
+def list_translation_texts() -> Dict[str, Any]:
+    """Texts (newest first), the sizes on offer and what a click costs."""
+    return {
+        "texts": [text_store.text_summary(d) for d in text_store.list_texts()],
+        "sizes": [
+            {"key": key, "label": label, "minutes": minutes, "words": list(words)}
+            for key, (label, minutes, words) in config.TEXT_SIZES.items()
+        ],
+        "default_size": config.TEXT_DEFAULT_SIZE,
+        "levels": list(text_translation.LEVELS),
+        "default_level": text_translation.DEFAULT_LEVEL,
+        "costs": _text_costs(),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+@router.post("/translate/texts", status_code=201)
+def create_translation_text(
+    body: CreateTextRequest,
+    translator_factory: TextTranslatorFactory = Depends(get_text_translator_factory),
+) -> Dict[str, Any]:
+    """Have Claude write a text in a context at a size and level (a paid click)."""
+    theme = _use_theme(body.theme)
+    try:
+        result = translator_factory().write_text(
+            size=body.size,
+            level=body.level,
+            theme=theme,
+            avoid_titles=text_store.avoid_titles(theme),
+        )
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    document = _new_text(
+        origin=text_store.ORIGIN_GENERATED,
+        title=result.title,
+        text=result.text,
+        extra={"theme": theme, "size": body.size, "level": body.level},
+    )
+    usage = learner_store.record_claude_usage(
+        "translate_text", result.call.model, result.call.usage, session_id=document["id"]
+    )
+    document["generation"] = {
+        "model": result.call.model,
+        "effort": result.call.effort,
+        "request_id": result.call.request_id,
+        "usage": {**result.call.usage, "cost_usd": usage["cost_usd"]},
+    }
+    text_store.save_text(document)
+    return _text_payload(document)
+
+
+@router.post("/translate/texts/custom", status_code=201)
+def create_custom_translation_text(body: CustomTextRequest) -> Dict[str, Any]:
+    """Store a text the learner pasted, exactly as pasted ($0)."""
+    text = body.text.strip()
+    if len(text) < config.TEXT_CUSTOM_MIN_CHARS:
+        raise HTTPException(status_code=400, detail="Текст слишком короткий.")
+    words = text.split()
+    title = body.title.strip() or " ".join(words[:6]) + ("…" if len(words) > 6 else "")
+    document = _new_text(origin=text_store.ORIGIN_CUSTOM, title=title, text=text, extra={})
+    text_store.save_text(document)
+    return _text_payload(document)
+
+
+@router.get("/translate/texts/{text_id}")
+def get_translation_text(text_id: str) -> Dict[str, Any]:
+    return _text_payload(_text_or_404(text_id))
+
+
+@router.post("/translate/texts/{text_id}/review", status_code=201)
+def review_text_translation(
+    text_id: str,
+    body: TextReviewRequest,
+    translator_factory: TextTranslatorFactory = Depends(get_text_translator_factory),
+) -> Dict[str, Any]:
+    """Store the learner's translation and have Sonnet review it.
+
+    The translation is saved before Claude is asked, so a missing key or a
+    failed call never loses it; the same text sent again reuses the stored
+    review instead of paying for a new one.
+    """
+    document = _text_or_404(text_id)
+    translation = body.translation.strip()
+    if not translation:
+        raise HTTPException(status_code=400, detail="Перевод пустой.")
+    previous = text_store.latest_review(document)
+    if previous and previous.get("text") == translation:
+        return {**_text_payload(document), "cached": True}
+
+    number = text_store.next_attempt_number(document)
+    try:
+        result = translator_factory().review(
+            document["text"],
+            translation,
+            direction=document.get("direction", text_translation.DIRECTION_EN_RU),
+            phrase_prefix=f"r{number}-",
+        )
+    except (MissingAnthropicApiKeyError, AnalysisError) as exc:
+        text_store.add_attempt(text_id, {"text": translation, "review": None, "phrases": []})
+        status = 400 if isinstance(exc, MissingAnthropicApiKeyError) else 502
+        raise HTTPException(status_code=status, detail=str(exc))
+    usage = learner_store.record_claude_usage(
+        "translate_review", result.call.model, result.call.usage, session_id=text_id
+    )
+    text_store.add_attempt(
+        text_id,
+        {
+            "text": translation,
+            "review": result.review,
+            "phrases": result.phrases,
+            "model": result.call.model,
+            "request_id": result.call.request_id,
+            "cost_usd": usage["cost_usd"],
+        },
+    )
+    return {**_text_payload(_text_or_404(text_id)), "cached": False}
+
+
+@router.put("/translate/texts/{text_id}/phrases")
+def put_text_word_picks(text_id: str, body: TextPhrasesRequest) -> Dict[str, Any]:
+    """Save which useful phrases of a text become RU -> EN word cards ($0)."""
+    document = _text_or_404(text_id)
+    try:
+        return learner_store.save_word_picks(
+            text_id, text_store.vocabulary(document), list(dict.fromkeys(body.picked))
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

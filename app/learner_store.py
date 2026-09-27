@@ -833,13 +833,34 @@ def set_word_picks(
     exercise_set = load_set(set_id)
     if exercise_set is None:
         raise KeyError(set_id)
-    vocabulary = {entry["id"]: entry for entry in exercise_set.get("vocabulary") or []}
+    return save_word_picks(
+        set_id,
+        exercise_set.get("vocabulary") or [],
+        chosen,
+        lesson_id=exercise_set.get("lesson_id"),
+        now=now,
+    )
+
+
+def save_word_picks(
+    source_id: str,
+    entries: List[Dict[str, Any]],
+    chosen: List[str],
+    *,
+    lesson_id: Optional[str] = None,
+    now: Optional[dt.datetime] = None,
+) -> Dict[str, Any]:
+    """The pick log behind set_word_picks, for any source of candidates - a
+    set, or a translated text (app.text_store). `source_id` goes into the
+    record's `set_id` field, which has always meant "where the word came
+    from"; `entries` are the candidates with their ids."""
+    vocabulary = {entry["id"]: entry for entry in entries}
     unknown = [vocab_id for vocab_id in chosen if vocab_id not in vocabulary]
     if unknown:
         raise ValueError(f"Unknown vocabulary ids: {', '.join(unknown)}")
     ts = (now or dt.datetime.now()).isoformat(timespec="seconds")
     with _picks_lock:
-        current = set(picked_vocabulary(set_id))
+        current = set(picked_vocabulary(source_id))
         wanted = set(chosen)
         changes = [(v, "add") for v in vocabulary if v in wanted - current]
         changes += [(v, "remove") for v in vocabulary if v in current - wanted]
@@ -849,10 +870,10 @@ def set_word_picks(
                 _picks_path(),
                 {
                     "ts": ts,
-                    "set_id": set_id,
+                    "set_id": source_id,
                     "vocab_id": vocab_id,
                     "action": action,
-                    "lesson_id": exercise_set.get("lesson_id"),
+                    "lesson_id": lesson_id,
                     "word": {k: v for k, v in entry.items() if k != "id"},
                 },
             )
@@ -1386,3 +1407,10 @@ def usage_summary(recent: int = 50) -> Dict[str, Any]:
         "by_purpose": by_purpose,
         "recent": records[-recent:][::-1],
     }
+
+
+def average_claude_cost(purpose: str, fallback: float) -> float:
+    """The average cost of one Claude call of `purpose` so far, or `fallback`
+    until the usage log has one - the price shown next to a button."""
+    entry = usage_summary(recent=0)["by_purpose"].get(f"anthropic:{purpose}") or {}
+    return entry.get("avg_cost_usd") or fallback

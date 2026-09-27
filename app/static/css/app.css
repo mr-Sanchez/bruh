@@ -166,6 +166,18 @@ button.secondary:hover { background: var(--accent-weak); filter: none; }
 button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
 button.success { background: var(--teal); color: var(--on-accent); }
 a:has(> button) { text-decoration: none; }
+/* The hotkey of a button: a small outlined cap in the button's own colour. */
+.key-hint {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font: 600 0.72em/1.5 var(--font-body);
+  opacity: 0.65;
+  vertical-align: 0.1em;
+}
+@media (hover: none) { .key-hint { display: none; } }
 
 .status-line {
   display: flex;
@@ -848,6 +860,34 @@ a.activity:hover { border-color: var(--plum-border); color: var(--text); }
 .translation-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 .translation-review { margin-top: 12px; }
 .translation-error { min-height: 1.2em; color: var(--danger); }
+/* «Перевод текста»: the text beside the translation field, then the review. */
+.translate-new { margin-top: 14px; }
+.translate-new textarea { width: 100%; resize: vertical; line-height: 1.5; }
+.translate-options { display: flex; gap: 16px; flex-wrap: wrap; margin: 12px 0 4px; }
+.translate-options select { width: auto; max-width: 100%; }
+.translate-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.translate-grid h3 { margin-top: 0; }
+.translate-source {
+  padding: 12px 16px;
+  background: var(--accent-weak);
+  border-radius: var(--radius-sm);
+  font-size: 1.05rem;
+  line-height: 1.6;
+}
+.translate-source p, .translate-final p { margin: 0 0 10px; }
+.translate-source p:last-child, .translate-final p:last-child { margin-bottom: 0; }
+.translate-grid textarea { width: 100%; resize: vertical; font-size: 1.05rem; line-height: 1.6; }
+.translate-score { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+.translate-accuracy { font-family: var(--font-display); font-size: 2rem; font-weight: 700; color: var(--accent); }
+.translate-final {
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  line-height: 1.6;
+}
+@media (max-width: 960px) {
+  .translate-grid { grid-template-columns: minmax(0, 1fr); }
+}
 .tricky-words { list-style: none; margin: 0; padding: 0; }
 .tricky-words li { padding: 6px 0; border-bottom: 1px solid var(--border); }
 .tricky-words .phrase { font-weight: 600; }

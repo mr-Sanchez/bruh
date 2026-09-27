@@ -136,7 +136,7 @@ Views.verbs = (() => {
               ).join("")}
             </div>
             <div class="button-row">
-              <button type="submit" data-role="check">Проверить</button>
+              <button type="submit" data-role="check"><span>Проверить</span>${keyHint("Enter")}</button>
             </div>
           </form>
         </div>`;
@@ -166,7 +166,7 @@ Views.verbs = (() => {
           checked = true;
           results.push({ verb, graded });
           showVerdict(form, inputs, graded);
-          button.textContent = index + 1 < verbs.length ? "Дальше" : "Итог";
+          button.firstElementChild.textContent = index + 1 < verbs.length ? "Дальше" : "Итог";
           button.disabled = false;
           button.focus();
         } catch (err) {

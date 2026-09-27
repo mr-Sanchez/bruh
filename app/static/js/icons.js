@@ -23,6 +23,8 @@ const Icons = (() => {
       '<rect x="3" y="6" width="14" height="14" rx="3"/><path d="M7 3h11a3 3 0 0 1 3 3v11"/>',
     headphones:
       '<path d="M3 18v-6a9 9 0 0 1 18 0v6"/><rect x="3" y="14" width="4" height="7" rx="2"/><rect x="17" y="14" width="4" height="7" rx="2"/>',
+    translate:
+      '<path d="M3 5h8M7 3v2M5 5c0 4 2 7 5 8M9 5c0 3-2 6-5 8"/><path d="M13 21l4-9 4 9M14.5 18h5"/>',
     sparkle: '<path d="M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"/>',
     flame:
       '<path d="M12 22c4 0 7-3 7-7 0-4-3-6-4-10-2 2-3 4-3 6-1-1-2-2-2-4-3 2-5 5-5 8 0 4 3 7 7 7z"/>',

@@ -147,16 +147,47 @@ const Api = (() => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answers, context: context || null }),
       }),
-    // A spoken card answer -> text (Deepgram, English); the clip is not kept.
-    dictate: (blob, durationSeconds) => {
+    // A spoken answer -> text (Deepgram; "en" for a card, "ru" for a text
+    // translation); the clip is not kept.
+    dictate: (blob, durationSeconds, language) => {
       const form = new FormData();
       form.append("audio", blob, "answer.webm");
       form.append("duration_seconds", String(durationSeconds || 0));
+      form.append("language", language || "en");
       return request("/api/learner/dictate", { method: "POST", body: form });
     },
     // Which of a set's vocabulary entries are word cards: the whole choice ($0).
     saveWordPicks: (id, picked) =>
       request(`/api/practice/sets/${encodeURIComponent(id)}/vocabulary`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ picked }),
+      }),
+
+    // «Перевод текста»: a text (Claude's - paid - or pasted - free), then a
+    // Sonnet review of each translation and the picked phrases as word cards.
+    listTexts: () => request("/api/translate/texts"),
+    getText: (id) => request(`/api/translate/texts/${encodeURIComponent(id)}`),
+    createText: (size, level, theme) =>
+      request("/api/translate/texts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ size, level, theme }),
+      }),
+    createCustomText: (text) =>
+      request("/api/translate/texts/custom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      }),
+    reviewText: (id, translation) =>
+      request(`/api/translate/texts/${encodeURIComponent(id)}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ translation }),
+      }),
+    saveTextPhrases: (id, picked) =>
+      request(`/api/translate/texts/${encodeURIComponent(id)}/phrases`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ picked }),
@@ -234,6 +265,11 @@ function escapeHtml(value) {
   const div = document.createElement("div");
   div.textContent = value == null ? "" : String(value);
   return div.innerHTML;
+}
+
+// The key that works a button, shown on it (hidden on touch screens).
+function keyHint(key) {
+  return `<kbd class="key-hint">${escapeHtml(key)}</kbd>`;
 }
 
 function formatDuration(totalSeconds) {

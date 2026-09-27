@@ -709,7 +709,14 @@ def assemble_exercises(parsed: GeneratedSet) -> List[Dict[str, Any]]:
 
 
 def assemble_vocabulary(parsed: GeneratedSet) -> List[Dict[str, str]]:
-    """The set's word card candidates with stable ids (v1, v2...).
+    """The set's word card candidates with stable ids (v1, v2...)."""
+    return clean_vocabulary(parsed.vocabulary, config.SET_VOCABULARY)
+
+
+def clean_vocabulary(
+    entries: Sequence[VocabularyItem], limit: int, id_prefix: str = "v"
+) -> List[Dict[str, str]]:
+    """Word card candidates as dicts with ids `<id_prefix>1, 2...`, at most `limit`.
 
     Entries without an English or a Russian side are dropped, and so are
     formulas ("have + V3") and repeats of the same English: a card needs one
@@ -717,7 +724,7 @@ def assemble_vocabulary(parsed: GeneratedSet) -> List[Dict[str, str]]:
     """
     vocabulary: List[Dict[str, str]] = []
     seen = set()
-    for entry in parsed.vocabulary:
+    for entry in entries:
         english, russian = entry.english.strip(), entry.russian.strip()
         key = _sentence_key(english)
         if not key or not russian or "+" in english or key in seen:
@@ -732,8 +739,8 @@ def assemble_vocabulary(parsed: GeneratedSet) -> List[Dict[str, str]]:
                 "note": entry.note.strip(),
             }
         )
-        if len(vocabulary) == config.SET_VOCABULARY:
+        if len(vocabulary) == limit:
             break
     for number, entry in enumerate(vocabulary, start=1):
-        entry["id"] = f"v{number}"
+        entry["id"] = f"{id_prefix}{number}"
     return vocabulary
