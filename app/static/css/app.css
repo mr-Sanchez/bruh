@@ -789,6 +789,7 @@ a.activity:hover { border-color: var(--plum-border); color: var(--text); }
 .set-results { list-style: none; padding: 0; margin: 12px 0; }
 .set-results li { border-top: 1px solid var(--border); padding: 8px 0; }
 .set-results li p { margin: 4px 0; }
+.set-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .self-grade { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
 
 /* --- spoken drills (speech.js): metrics, timeline, reading check -------- */

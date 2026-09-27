@@ -521,6 +521,102 @@ const Drill = (() => {
     translate: "Переведите на английский",
   };
 
+  function fullSentence(ex, filler) {
+    return `${ex.before}${filler}${ex.after}`;
+  }
+
+  // One finished run of an AI set, answer by answer: right after the set and
+  // again from its history (the run and Claude's verdicts are in the set file).
+  function setRunRows(exercises, run) {
+    const byId = {};
+    exercises.forEach((ex) => (byId[ex.id] = ex));
+    return run.results
+      .filter((r) => byId[r.exercise_id])
+      .map((r) => {
+        const ex = byId[r.exercise_id];
+        const mark = r.correct ? "✓" : "✕";
+        if (ex.type === "translate") {
+          const fixed = r.corrected && !r.correct && normalize(r.corrected) !== normalize(r.answer);
+          return `
+            <li>
+              <p class="set-russian">${mark} ${escapeHtml(ex.russian)}</p>
+              <p><span class="muted">Ваш ответ:</span> ${escapeHtml(r.answer) || "—"}</p>
+              ${r.comment ? `<p>${escapeHtml(r.comment)}</p>` : ""}
+              ${fixed ? `<p class="correction">✓ ${escapeHtml(r.corrected)}</p>` : ""}
+              <p class="muted">Образец: ${escapeHtml(ex.reference)}</p>
+            </li>`;
+        }
+        const right = ex.type === "gap" ? fullSentence(ex, ex.accept[0]) : ex.accept[0];
+        return `
+          <li>
+            <p>${mark} ${escapeHtml(right)}</p>
+            ${r.correct ? "" : `<p class="muted">Ваш ответ: ${escapeHtml(r.answer) || "—"}</p>`}
+          </li>`;
+      })
+      .join("");
+  }
+
+  // A past set from the history: its runs (newest first, switchable), each
+  // answer with the verdict it got, and the set's vocabulary. Free, read-only.
+  function showSetRuns(container, payload, { onBack, onRedo }) {
+    const exerciseSet = payload.set;
+    const runs = exerciseSet.runs || [];
+    let current = runs.length - 1;
+    const when = (run) => escapeHtml((run.at || "").slice(0, 16).replace("T", " "));
+
+    function show() {
+      const run = runs[current];
+      container.innerHTML = `
+        <div class="card drill-card">
+          <div class="drill-head">
+            <h2>AI-набор: <span data-role="topic"></span></h2>
+            <span class="muted">${escapeHtml((exerciseSet.created_at || "").slice(0, 16).replace("T", " "))}</span>
+          </div>
+          ${
+            runs.length > 1
+              ? `<div class="button-row">${runs
+                  .map(
+                    (r, i) => `<button class="${i === current ? "" : "secondary"}" data-run="${i}">${when(r)} · ${
+                      r.correct
+                    }/${r.total}</button>`
+                  )
+                  .reverse()
+                  .join("")}</div>`
+              : ""
+          }
+          <p class="drill-score">${run.correct} из ${run.total} верно</p>
+          <p class="muted">Пройден ${when(run)}.</p>
+          <ul class="set-results">${setRunRows(exerciseSet.exercises, run)}</ul>
+          <div data-role="vocabulary"></div>
+          <div class="button-row" data-role="buttons"></div>
+        </div>`;
+      topicLabel(exerciseSet.topic).then((label) => {
+        const slot = container.querySelector('[data-role="topic"]');
+        if (slot) slot.textContent = label;
+      });
+      container.querySelectorAll("[data-run]").forEach((button) =>
+        button.addEventListener("click", () => {
+          current = Number(button.dataset.run);
+          show();
+        })
+      );
+      vocabularyPicker(container.querySelector('[data-role="vocabulary"]'), {
+        vocabulary: exerciseSet.vocabulary || [],
+        picked: payload.picked_vocabulary || [],
+        perDay: payload.words_per_day,
+        save: (chosen) => Api.saveWordPicks(exerciseSet.id, chosen),
+        sourceLabel: "из этого набора",
+      });
+      setButtons(container, [
+        ["Назад", "", onBack],
+        ["Пройти ещё раз", "secondary", onRedo],
+      ]);
+      window.scrollTo(0, 0);
+    }
+
+    show();
+  }
+
   function runSet(container, exerciseSet, { onFinish, context }) {
     const exercises = exerciseSet.exercises;
     const answers = {};
@@ -576,10 +672,6 @@ const Drill = (() => {
         ${ex.focus ? `<p class="muted">Используйте: ${escapeHtml(ex.focus)}</p>` : ""}
         <textarea data-role="input" rows="2" placeholder="Ваш перевод" spellcheck="false"></textarea>
         <p class="muted">Переводы проверит ИИ ассистент в конце набора.</p>`;
-    }
-
-    function fullSentence(ex, filler) {
-      return `${ex.before}${filler}${ex.after}`;
     }
 
     function check(ex, input) {
@@ -668,31 +760,7 @@ const Drill = (() => {
     }
 
     function showResults({ run, new_cards: newCards, picked_vocabulary: picked, words_per_day: perDay }) {
-      const byId = {};
-      exercises.forEach((ex) => (byId[ex.id] = ex));
-      const rows = run.results
-        .map((r) => {
-          const ex = byId[r.exercise_id];
-          const mark = r.correct ? "✓" : "✕";
-          if (ex.type === "translate") {
-            const fixed = r.corrected && !r.correct && normalize(r.corrected) !== normalize(r.answer);
-            return `
-              <li>
-                <p class="set-russian">${mark} ${escapeHtml(ex.russian)}</p>
-                <p><span class="muted">Ваш ответ:</span> ${escapeHtml(r.answer) || "—"}</p>
-                ${r.comment ? `<p>${escapeHtml(r.comment)}</p>` : ""}
-                ${fixed ? `<p class="correction">✓ ${escapeHtml(r.corrected)}</p>` : ""}
-                <p class="muted">Образец: ${escapeHtml(ex.reference)}</p>
-              </li>`;
-          }
-          const right = ex.type === "gap" ? fullSentence(ex, ex.accept[0]) : ex.accept[0];
-          return `
-            <li>
-              <p>${mark} ${escapeHtml(right)}</p>
-              ${r.correct ? "" : `<p class="muted">Ваш ответ: ${escapeHtml(r.answer) || "—"}</p>`}
-            </li>`;
-        })
-        .join("");
+      const rows = setRunRows(exercises, run);
       container.innerHTML = `
         <div class="card drill-card">
           <h2>AI-набор — готово</h2>
@@ -790,5 +858,5 @@ const Drill = (() => {
     refresh();
   }
 
-  return { runCards, runSet, normalize, matches, wordDiff, wireDictation, vocabularyPicker };
+  return { runCards, runSet, showSetRuns, normalize, matches, wordDiff, wireDictation, vocabularyPicker };
 })();

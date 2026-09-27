@@ -1593,6 +1593,7 @@ def _set_payload(exercise_set: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
         "summary": learner_store.set_summary(exercise_set),
         # Which of the set's vocabulary entries are word cards right now.
         "picked_vocabulary": learner_store.picked_vocabulary(exercise_set["id"]),
+        "words_per_day": config.NEW_WORDS_PER_DAY,
         **extra,
     }
 

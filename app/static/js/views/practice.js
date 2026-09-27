@@ -547,7 +547,10 @@ Views.practice = (() => {
                   s.best_score * 100
                 )}% · пройден ${s.runs} раз(а)</span>
               </div>
-              <button class="secondary" data-set-start="${escapeHtml(s.id)}">Пройти ещё раз</button>
+              <div class="set-actions">
+                <button class="secondary" data-set-results="${escapeHtml(s.id)}">Результаты</button>
+                <button class="secondary" data-set-start="${escapeHtml(s.id)}">Пройти ещё раз</button>
+              </div>
             </li>`
               )
               .join("")}</ul>
@@ -576,6 +579,22 @@ Views.practice = (() => {
           run((await Api.getSet(button.dataset.setStart)).set);
         } catch (err) {
           status.textContent = `Не удалось открыть набор: ${err.message}`;
+          button.disabled = false;
+        }
+      })
+    );
+    card.querySelectorAll("[data-set-results]").forEach((button) =>
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          const payload = await Api.getSet(button.dataset.setResults);
+          if (root !== container) return;
+          Drill.showSetRuns(container, payload, {
+            onBack: () => rerender(topicKey),
+            onRedo: () => run(payload.set),
+          });
+        } catch (err) {
+          status.textContent = `Не удалось открыть результаты: ${err.message}`;
           button.disabled = false;
         }
       })
