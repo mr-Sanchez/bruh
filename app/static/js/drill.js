@@ -165,14 +165,16 @@ const Drill = (() => {
     return `${textarea}
       <div class="dictate-row">
         <button type="button" class="secondary dictate-button" data-role="dictate">${Icons.svg("mic", 18)}<span>Надиктовать</span></button>
-        <span class="muted" data-role="dictate-status"></span>
+        <span class="muted" data-role="dictate-status">R — надиктовать и стоп, Enter — проверить</span>
       </div>`;
   }
 
   // Speak the answer instead of typing it: the clip goes to Deepgram
   // (POST /api/learner/dictate) and the text lands in the field, where it can
-  // still be corrected before «Проверить». Returns a stop() for the caller.
-  function wireDictation(container, input) {
+  // still be corrected before «Проверить». Keys, while no text field has the
+  // focus: R starts and stops (by key position, so a Russian layout works too),
+  // Enter calls onEnter; Esc leaves the field. Returns a stop() for the caller.
+  function wireDictation(container, input, { onEnter } = {}) {
     const button = container.querySelector('[data-role="dictate"]');
     const status = container.querySelector('[data-role="dictate-status"]');
     const label = button.querySelector("span");
@@ -196,15 +198,14 @@ const Drill = (() => {
           status.textContent = "Ничего не расслышали. Попробуйте ещё раз.";
         } else {
           input.value = input.value.trim() ? `${input.value.trim()} ${text}` : text;
-          status.textContent = "Проверьте текст и нажмите «Проверить».";
-          input.focus();
+          status.textContent = "Проверьте текст и нажмите «Проверить» (Enter) или R, чтобы добавить.";
         }
       } catch (err) {
         status.textContent = `Не удалось распознать: ${err.message}`;
       }
       button.disabled = input.readOnly;
     };
-    button.addEventListener("click", async () => {
+    const toggle = async () => {
       if (recorder) {
         recorder.stop();
         return;
@@ -224,13 +225,39 @@ const Drill = (() => {
         return;
       }
       button.classList.add("recording");
-      status.textContent = `Говорите по-английски (до ${DICTATION_MAX_SECONDS} с).`;
-    });
-    return () => {
+      status.textContent = `Говорите по-английски (до ${DICTATION_MAX_SECONDS} с). Стоп — R.`;
+    };
+    button.addEventListener("click", toggle);
+    const onKey = (event) => {
+      // The card was left without stop() (another route): let go of the mic.
+      if (!button.isConnected) return stop();
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+      const inField = !!event.target.closest("input, textarea, select, [contenteditable]");
+      if (event.key === "Escape" && event.target === input) {
+        input.blur();
+        return;
+      }
+      if (event.code === "KeyR" && !event.repeat && (recorder || !inField)) {
+        event.preventDefault();
+        if (!button.disabled) toggle();
+        return;
+      }
+      if (event.key === "Enter" && !inField && !recorder && onEnter) {
+        // A focused button would click itself; the dictation one must not
+        // restart the recording.
+        if (event.target.closest("button, a") && event.target !== button) return;
+        event.preventDefault();
+        onEnter();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    const stop = () => {
+      document.removeEventListener("keydown", onKey);
       if (recorder) recorder.dispose();
       reset();
       button.disabled = true;
     };
+    return stop;
   }
 
   // Where a mistake card came from: the learner's own mistake and the rule
@@ -336,7 +363,7 @@ const Drill = (() => {
       const input = container.querySelector('[data-role="input"]');
       const result = container.querySelector('[data-role="result"]');
       const ex = item.exercise;
-      const stopDictation = wireDictation(container, input);
+      let stopDictation = () => {};
       const check = async () => {
         if (input.readOnly) return;
         const answer = input.value;
@@ -382,8 +409,9 @@ const Drill = (() => {
           check();
         }
       });
+      stopDictation = wireDictation(container, input, { onEnter: check });
       buttons([["Проверить", "", check]]);
-      input.focus();
+      // No focus in the field, so R and Enter work at once; a click starts typing.
     }
 
     function askTyped(item) {
