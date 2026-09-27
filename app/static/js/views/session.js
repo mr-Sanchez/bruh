@@ -1,6 +1,7 @@
 // Session view: one recording's transcript, audio player, and analysis.
-// A spoken drill (talk, shadowing) is shown with its measurements instead:
-// it is never sent to Claude.
+// A spoken take also shows its pace and pauses; a spoken drill (shadowing, an
+// older «60 секунд» take) is shown with its measurements only: it is never
+// sent to Claude.
 window.Views = window.Views || {};
 
 Views.session = (() => {
@@ -31,6 +32,28 @@ Views.session = (() => {
           <summary>Транскрипт как есть</summary>
           <div class="transcript-box">${escapeHtml(session.transcript || "(нет транскрипта)")}</div>
         </details>
+      </div>`;
+  }
+
+  // A «Говорение» take: its prompt and place in its series.
+  function renderSpeaking(session) {
+    const drill = session.drill;
+    if (!drill) return "";
+    const limit = drill.time_limit ? ` · лимит ${drill.time_limit / 60} мин` : "";
+    const round = `Дубль ${drill.round || 1}${drill.round > 1 ? " серии — тренировочный" : ""}${limit}`;
+    return `
+      <div class="speaking-prompt">
+        <div class="muted">${drill.question ? `Тема: ${escapeHtml(drill.hint)} · ` : "Своя тема · "}${round}</div>
+        ${drill.question ? `<p class="speaking-question">${escapeHtml(drill.question)}</p>` : ""}
+      </div>`;
+  }
+
+  function renderMeasurements(session) {
+    if (!session.speech) return "";
+    return `
+      <div class="card">
+        <h2>Темп и паузы</h2>
+        ${Speech.renderReport(session)}
       </div>`;
   }
 
@@ -65,7 +88,7 @@ Views.session = (() => {
     }
 
     const typed = session.input_mode === "text";
-    const title = TITLES[session.kind] || "";
+    const title = TITLES[session.kind] || (session.drill ? "Говорение · " : "");
     const drill = session.kind === "talk" || session.kind === "shadowing";
     container.innerHTML = `
       <div class="card">
@@ -85,11 +108,12 @@ Views.session = (() => {
                </div>`
             : ""
         }
+        ${session.kind === "monologue" ? renderSpeaking(session) : ""}
         ${session.error_message ? `<p class="muted">${escapeHtml(session.error_message)}</p>` : ""}
         ${session.image_url ? `<img class="session-picture" src="${session.image_url}" alt="Картинка, которую вы описывали" />` : ""}
         ${session.audio_url ? `<audio controls src="${session.audio_url}" style="width:100%"></audio>` : ""}
       </div>
-      ${drill ? renderDrill(session) : renderTranscript(session, typed)}
+      ${drill ? renderDrill(session) : renderMeasurements(session) + renderTranscript(session, typed)}
     `;
 
     if (drill) return;

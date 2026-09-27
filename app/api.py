@@ -23,7 +23,7 @@ import logging
 import mimetypes
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -262,7 +262,7 @@ def _transcribe_session(
             audio_seconds,
             session_id=session.id,
         )
-        if session.is_drill:
+        if session.is_drill or session.kind == config.KIND_MONOLOGUE:
             # Logged before session.json says "done", so a screen that reloads
             # the moment polling ends already sees the attempt.
             try:
@@ -281,38 +281,42 @@ def _transcribe_session(
         utils.write_session_meta(session)
 
 
-def _drill_meta(
-    kind: str,
-    prompt_id: Optional[str],
-    series: Optional[str],
-    source_session_id: Optional[str],
-    passage: Optional[int],
+_PROMPT_KEYS: Tuple[str, ...] = ("prompt_id", "question", "hint", "theme")
+
+
+def _speaking_meta(
+    prompt_id: Optional[str], series: Optional[str], time_limit: Optional[int]
 ) -> Dict[str, Any]:
-    """What a drill take practises, checked before anything is saved."""
-    if kind == config.KIND_TALK:
-        if series is None:
+    """What a «Говорение» take practises: its prompt (None for an own topic),
+    time limit and place in a series. Round 1 starts a series named after
+    itself; later rounds keep the first take's prompt and limit, whatever
+    is sent."""
+    if series is None:
+        if time_limit is not None and time_limit not in config.SPEAKING_TIME_LIMITS:
+            raise HTTPException(status_code=400, detail="Unsupported time limit.")
+        shown: Dict[str, Any] = {key: None for key in _PROMPT_KEYS}
+        if prompt_id is not None:
             # The prompt is stored as shown: own themes' prompts can be deleted.
-            prompt = theme_store.resolve_prompt(prompt_id or "")
+            prompt = theme_store.resolve_prompt(prompt_id)
             if prompt is None:
                 raise HTTPException(status_code=400, detail="Unknown speaking prompt.")
             theme_store.remember(prompt["theme"])
-            return {
-                "prompt_id": prompt["id"],
-                "question": prompt["question"],
-                "hint": prompt["hint"],
-                "theme": prompt["theme"],
-                "series": None,
-                "round": 1,
-            }
-        first = _load_session_or_404(series)
-        if first.kind != config.KIND_TALK or (first.drill or {}).get("series") != first.id:
-            raise HTTPException(status_code=400, detail="Not the first take of a talk series.")
-        shown = first.drill or {}
-        return {
-            **{key: shown.get(key) for key in ("prompt_id", "question", "hint", "theme")},
-            "series": first.id,
-            "round": learner_store.talk_round(first.id),
-        }
+            shown = {"prompt_id": prompt["id"], **{k: prompt[k] for k in _PROMPT_KEYS[1:]}}
+        return {**shown, "time_limit": time_limit, "series": None, "round": 1}
+    first = _load_session_or_404(series)
+    if first.kind != config.KIND_MONOLOGUE or (first.drill or {}).get("series") != first.id:
+        raise HTTPException(status_code=400, detail="Not the first take of a series.")
+    shown = first.drill or {}
+    return {
+        **{key: shown.get(key) for key in _PROMPT_KEYS},
+        "time_limit": shown.get("time_limit"),
+        "series": first.id,
+        "round": learner_store.talk_round(first.id),
+    }
+
+
+def _shadowing_meta(source_session_id: Optional[str], passage: Optional[int]) -> Dict[str, Any]:
+    """What a shadowing take reads, checked before anything is saved."""
     if source_session_id is None or passage is None:
         raise HTTPException(status_code=400, detail="Name the recording and passage to read.")
     source = _load_session_or_404(source_session_id)
@@ -325,7 +329,7 @@ def _drill_meta(
 
 
 def _parse_silences(raw: Optional[str]) -> Optional[List[List[float]]]:
-    """The silence spans the browser found in a drill take's audio, as sent:
+    """The silence spans the browser found in a spoken take's audio, as sent:
     a JSON list of [start, end] seconds. None when the browser could not
     measure them - the pauses then fall back to Deepgram's word gaps."""
     if raw is None:
@@ -357,8 +361,8 @@ def get_config() -> Dict[str, Any]:
         "deepgram_configured": config.get_api_key() is not None,
         "anthropic_configured": config.get_anthropic_api_key() is not None,
         "image_max_side": config.IMAGE_MAX_SIDE_PX,
-        "talk_seconds": config.TALK_SECONDS,
-        "talk_rounds": config.TALK_ROUNDS,
+        "speaking_time_limits": list(config.SPEAKING_TIME_LIMITS),
+        "speaking_rounds": config.SPEAKING_ROUNDS,
     }
 
 
@@ -375,6 +379,7 @@ async def create_session(
     mime_type: str = Form(""),
     prompt_id: Optional[str] = Form(None, max_length=80),
     series: Optional[str] = Form(None),
+    time_limit: Optional[int] = Form(None),
     source_session_id: Optional[str] = Form(None),
     passage: Optional[int] = Form(None),
     silences: Optional[str] = Form(None, max_length=20000),
@@ -384,26 +389,32 @@ async def create_session(
 ) -> Dict[str, Any]:
     """A new take: an audio `file` (transcribed in the background) or a typed
     `text` (done at once). A picture description also carries its `image`;
-    a «60 секунд» take its `prompt_id` and, from round 2 on, its `series`;
-    a shadowing take the `source_session_id` and `passage` it reads (and
-    both drills the `silences` measured in their audio); a
-    lesson's spoken task (a monologue) its `lesson_id` and `task_id`."""
+    a «Говорение» monologue its `prompt_id` (none for an own topic), its
+    `time_limit` and, from round 2 on, its `series`; a shadowing take the
+    `source_session_id` and `passage` it reads (both the `silences` measured
+    in their audio); a lesson's spoken task (a monologue) its `lesson_id`
+    and `task_id`."""
     profile = config.profile_by_key(language)
     if kind not in config.SESSION_KINDS:
         raise HTTPException(status_code=400, detail="Unknown activity kind.")
     if (file is None) == (text is None):
         raise HTTPException(status_code=400, detail="Send either a recording or a text.")
     drill: Optional[Dict[str, Any]] = None
-    if kind in config.DRILL_KINDS:
+    speaking = any(v is not None for v in (prompt_id, series, time_limit, silences))
+    if kind == config.KIND_SHADOWING or (kind == config.KIND_MONOLOGUE and speaking):
         if file is None:
-            raise HTTPException(status_code=400, detail="A spoken drill needs a recording.")
-        drill = _drill_meta(kind, prompt_id, series, source_session_id, passage)
+            raise HTTPException(status_code=400, detail="A spoken take needs a recording.")
+        if kind == config.KIND_SHADOWING:
+            drill = _shadowing_meta(source_session_id, passage)
+            # The passage is English whatever the source recording's language.
+            profile = config.profile_by_key(config.DEFAULT_LANGUAGE_KEY)
+        else:
+            if lesson_id is not None or task_id is not None:
+                raise HTTPException(status_code=400, detail="A lesson task has no series.")
+            drill = _speaking_meta(prompt_id, series, time_limit)
         spans = _parse_silences(silences)
         if spans is not None:
             drill["silences"] = spans
-        if kind == config.KIND_SHADOWING:
-            # The passage is English whatever the source recording's language.
-            profile = config.profile_by_key(config.DEFAULT_LANGUAGE_KEY)
     if text is not None:
         if not text.strip():
             raise HTTPException(status_code=400, detail="The text is empty.")
@@ -443,8 +454,8 @@ async def create_session(
     session.language_key = profile.key
     session.drill = drill
     session.lesson = lesson
-    if drill is not None and kind == config.KIND_TALK and drill["series"] is None:
-        # Round 1 of a talk starts its own series, named after itself.
+    if drill is not None and kind == config.KIND_MONOLOGUE and drill["series"] is None:
+        # Round 1 of a «Говорение» take starts its own series, named after itself.
         session.drill = {**drill, "series": session.id}
     try:
         if image_upload is not None:
@@ -1091,6 +1102,25 @@ def get_learner_items(
     return {"today": today.isoformat(), "count": len(items), "items": items}
 
 
+@router.get("/learner/words")
+def get_word_cards() -> Dict[str, Any]:
+    """Every word card with its state and the card it repeats or overlaps."""
+    words = learner_store.word_card_list()
+    return {"count": len(words), "words": words}
+
+
+@router.delete("/learner/words/{card_id}")
+def delete_word_card(card_id: str) -> Dict[str, Any]:
+    """Delete a word card ($0): it stops being a card wherever it was picked.
+    Its attempts stay in the log, as they always do."""
+    if not re.fullmatch(r"wrd-[0-9a-f]{12}", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id.")
+    removed = learner_store.delete_word_card(card_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Такой карточки нет.")
+    return {"id": card_id, "removed_picks": removed}
+
+
 @router.get("/learner/queue")
 def get_learner_queue() -> Dict[str, Any]:
     """Today's cards: all due reviews plus the day's allowance of new ones."""
@@ -1269,7 +1299,8 @@ def get_shadowing_passages() -> Dict[str, Any]:
 
 @router.get("/speech/talks")
 def get_talk_series() -> Dict[str, Any]:
-    """«60 секунд» series with every round's measurements, newest first."""
+    """«Говорение» series (and older «60 секунд» ones) with every round's
+    measurements, newest first."""
     return {
         "series": learner_store.talk_series(),
         # Half a list away from the day's monologue prompt.
@@ -1588,8 +1619,13 @@ def _check_set_topic(topic: str) -> None:
 
 
 def _set_payload(exercise_set: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
+    shown = {k: v for k, v in exercise_set.items() if k != "verdicts"}
+    # Each vocabulary entry says which card it repeats or overlaps, if any.
+    shown["vocabulary"] = learner_store.annotate_vocabulary(
+        exercise_set["id"], exercise_set.get("vocabulary") or []
+    )
     return {
-        "set": {k: v for k, v in exercise_set.items() if k != "verdicts"},
+        "set": shown,
         "summary": learner_store.set_summary(exercise_set),
         # Which of the set's vocabulary entries are word cards right now.
         "picked_vocabulary": learner_store.picked_vocabulary(exercise_set["id"]),
@@ -1651,7 +1687,7 @@ def create_exercise_set(
             learner_store.set_avoid_sentences(body.topic),
             theme=theme,
             lesson=lesson,
-            known_words=learner_store.known_words(),
+            known_words=learner_store.known_words(topic=body.topic, theme=theme),
         )
     except MissingAnthropicApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1681,8 +1717,8 @@ def create_exercise_set(
         "intro": result.intro,
         "exercises": exercises,
         # Word card candidates, shown after a run (2026-09-27); sets written
-        # before that have none.
-        "vocabulary": result.vocabulary,
+        # before that have none. Ones that repeat a card are dropped.
+        "vocabulary": learner_store.fresh_vocabulary(result.vocabulary, config.SET_VOCABULARY),
         "generation": {
             "model": result.call.model,
             "effort": result.call.effort,
@@ -1874,8 +1910,18 @@ def _text_costs() -> Dict[str, float]:
 
 
 def _text_payload(document: Dict[str, Any]) -> Dict[str, Any]:
+    attempts = [
+        {
+            **attempt,
+            "phrases": learner_store.annotate_vocabulary(
+                document["id"], attempt.get("phrases") or []
+            ),
+        }
+        for attempt in document.get("attempts") or []
+    ]
     return {
         **document,
+        "attempts": attempts,
         "picked": learner_store.picked_vocabulary(document["id"]),
         "words_per_day": config.NEW_WORDS_PER_DAY,
         "costs": _text_costs(),
@@ -1923,12 +1969,13 @@ def create_translation_text(
 ) -> Dict[str, Any]:
     """Have Claude write a text in a context at a size and level (a paid click)."""
     theme = _use_theme(body.theme)
+    # The genre is picked here, not by Claude, and the latest texts in the
+    # context go along, so texts do not retell one story (2026-09-27).
+    recent = text_store.recent_texts(theme)
+    genre = text_translation.pick_genre([entry["genre"] for entry in recent])
     try:
         result = translator_factory().write_text(
-            size=body.size,
-            level=body.level,
-            theme=theme,
-            avoid_titles=text_store.avoid_titles(theme),
+            size=body.size, level=body.level, theme=theme, genre=genre, recent=recent
         )
     except MissingAnthropicApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1938,7 +1985,13 @@ def create_translation_text(
         origin=text_store.ORIGIN_GENERATED,
         title=result.title,
         text=result.text,
-        extra={"theme": theme, "size": body.size, "level": body.level},
+        extra={
+            "theme": theme,
+            "size": body.size,
+            "level": body.level,
+            "genre": genre,
+            "gist": result.gist,
+        },
     )
     usage = learner_store.record_claude_usage(
         "translate_text", result.call.model, result.call.usage, session_id=document["id"]
@@ -1998,6 +2051,7 @@ def review_text_translation(
             translation,
             direction=document.get("direction", text_translation.DIRECTION_EN_RU),
             phrase_prefix=f"r{number}-",
+            known_phrases=learner_store.cards_in_text(document["text"]),
         )
     except (MissingAnthropicApiKeyError, AnalysisError) as exc:
         text_store.add_attempt(text_id, {"text": translation, "review": None, "phrases": []})
@@ -2011,7 +2065,7 @@ def review_text_translation(
         {
             "text": translation,
             "review": result.review,
-            "phrases": result.phrases,
+            "phrases": learner_store.fresh_vocabulary(result.phrases, config.TEXT_PHRASES),
             "model": result.call.model,
             "request_id": result.call.request_id,
             "cost_usd": usage["cost_usd"],

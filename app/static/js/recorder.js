@@ -1,5 +1,5 @@
-// Microphone capture shared by every spoken activity (monologue, picture
-// description, «60 секунд», shadowing): MediaRecorder + a level meter.
+// Microphone capture shared by every spoken activity («Говорение», picture
+// description, a lesson task, shadowing): MediaRecorder + a level meter.
 //   Recorder.fillMics(select)          - list the microphones in a <select>
 //   Recorder.create({ onTick, onStop, maxSeconds })
 //     .start(deviceId)  - ask for the mic and start; throws if access fails

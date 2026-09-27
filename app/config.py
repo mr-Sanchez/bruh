@@ -287,10 +287,13 @@ KIND_MONOLOGUE: Final[str] = "monologue"
 KIND_PICTURE: Final[str] = "picture"
 # Spoken drills (Stage 6): measured from Deepgram's word timings, never sent
 # to Claude - so they are not analysed and never feed the item bank.
+# «60 секунд» (`talk`) was merged into the monologue on 2026-09-27 («Говорение»:
+# a monologue with a time limit and a series); older talk takes are still read.
 KIND_TALK: Final[str] = "talk"
 KIND_SHADOWING: Final[str] = "shadowing"
 DRILL_KINDS: Final[tuple] = (KIND_TALK, KIND_SHADOWING)
-SESSION_KINDS: Final[tuple] = (KIND_MONOLOGUE, KIND_PICTURE) + DRILL_KINDS
+# The kinds a new take may have.
+SESSION_KINDS: Final[tuple] = (KIND_MONOLOGUE, KIND_PICTURE, KIND_SHADOWING)
 # session.json `input_mode`: spoken (Deepgram transcript) or typed by hand.
 # A typed text is stored as transcript.txt verbatim and never goes to Deepgram.
 INPUT_VOICE: Final[str] = "voice"
@@ -334,7 +337,12 @@ SET_TRANSLATIONS: Final[int] = 4
 # Useful words and phrases written along with a set (2026-09-27, same call,
 # ≈ +0.2 ¢), shown after the run; the learner picks which become RU -> EN cards.
 SET_VOCABULARY: Final[int] = 8
-# The learner's word cards listed in a set request, so new ones are suggested.
+# Claude is asked for a few more: suggestions that repeat a card are dropped
+# in code (learner_model.similar_card), and the first SET_VOCABULARY stay.
+SET_VOCABULARY_ASKED: Final[int] = 10
+# The learner's word cards listed in a set request, so new ones are suggested:
+# the ones closest to the set (same topic, then same context), then the newest.
+# Only a hint - repeats are caught in code, so the list stays short (≈ 0.1 ¢).
 SET_KNOWN_WORDS: Final[int] = 80
 # The learner's own items on the topic shown to the generator as seeds, and
 # earlier set sentences on the topic it is told not to repeat - enough for
@@ -349,11 +357,12 @@ WORKOUT_MINUTES_SET: Final[float] = 6.0
 PRACTICE_DIRNAME: Final[str] = "practice"
 
 # --- Spoken drills (Stage 6, Deepgram only) --------------------------------
-# «60 секунд»: the same prompt TALK_ROUNDS times in a row, a minute each (the
-# 4-3-2 idea: each retelling gets easier). Only round 1 - the spontaneous
-# take - is logged as an attempt; rounds 2-3 are practice (decided 2026-09-19).
-TALK_SECONDS: Final[int] = 60
-TALK_ROUNDS: Final[int] = 3
+# «Говорение» (2026-09-27, «60 секунд» merged into the monologue): a take may
+# have a time limit and be one round of a series - the same prompt said again
+# (the 4-3-2 idea: each retelling gets easier). Only round 1 - the spontaneous
+# take - is logged as a fluency attempt; later rounds are practice.
+SPEAKING_TIME_LIMITS: Final[tuple] = (60, 120, 180)
+SPEAKING_ROUNDS: Final[int] = 3
 # Both drills log a topic attempt on this topic (decided 2026-09-19).
 FLUENCY_TOPIC: Final[str] = "filler_words_fluency"
 # Deepgram's documented filler tokens (English only, filler_words=true).
@@ -471,8 +480,13 @@ TEXT_CUSTOM_MAX_CHARS: Final[int] = 4_000
 TEXT_TRANSLATION_MAX_CHARS: Final[int] = 8_000
 # Useful phrases the review suggests as word cards (the learner picks).
 TEXT_PHRASES: Final[int] = 8
-# Earlier titles in the same context, so a new text is about something else.
-TEXT_AVOID_TITLES: Final[int] = 20
+TEXT_PHRASES_ASKED: Final[int] = 10  # see SET_VOCABULARY_ASKED
+# Word cards whose words all occur in the original, listed in a review
+# request so it suggests other phrases of the text.
+TEXT_KNOWN_PHRASES: Final[int] = 40
+# Earlier texts in the same context (gist + opening) a new text must differ
+# from: ~25 tokens each, ≈ 0.1 ¢ for all of them.
+TEXT_RECENT: Final[int] = 20
 # Shown next to the buttons until the usage log has real averages.
 TEXT_WRITE_COST_ESTIMATE_USD: Final[float] = 0.01
 TEXT_REVIEW_COST_ESTIMATE_USD: Final[float] = 0.03

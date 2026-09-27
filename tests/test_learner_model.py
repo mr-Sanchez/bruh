@@ -588,11 +588,35 @@ def pick(ts: dt.datetime, vocab_id: str, english: str, action: str = "add", set_
         "action": action,
         "lesson_id": "present_perfect",
         "word": {"english": english, "russian": "перевод", "example": "", "example_russian": "",
-                 "note": ""},
+                 "note": "", "transcription": "/ˈsʌmθɪŋ/"},
     }
 
 
 class WordCardTests(unittest.TestCase):
+    def test_word_keys_ignore_fillers_articles_and_endings(self) -> None:
+        key = learner_model.word_key
+        self.assertEqual(key("Make up one's mind"), key("make up your mind"))
+        self.assertEqual(key("reach out to someone"), key("Reach out to somebody."))
+        self.assertEqual(key("roll back the releases"), key("roll back a release"))
+        self.assertEqual(key("a tight deadline"), key("tight deadlines"))
+        self.assertEqual(key("research (verb)"), key("research"))
+        self.assertNotEqual(key("look for"), key("look after"))
+
+    def test_similar_card_prefers_an_exact_match_then_the_closest_overlap(self) -> None:
+        def card(english: str) -> Dict[str, Any]:
+            return {"id": learner_model.item_id(learner_model.KIND_WORD, english),
+                    "content": {"english": english}}
+
+        cards = [card("roll back a broken release"), card("roll back a release"),
+                 card("a tight deadline")]
+        similar = learner_model.similar_card
+        self.assertEqual(similar("Roll back releases", cards)["exact"], True)
+        found = similar("roll back", cards)
+        self.assertEqual((found["english"], found["exact"]), ("roll back a release", False))
+        self.assertEqual(similar("deadline", cards)["english"], "a tight deadline")
+        self.assertIsNone(similar("reach out", cards))
+        self.assertIsNone(similar("a tight deadline", cards, skip_id=cards[2]["id"]))
+
     def test_the_newest_pick_wins_and_the_same_word_from_two_sets_is_one_card(self) -> None:
         picks = [
             pick(day(1), "v1", "so far"),
@@ -605,6 +629,7 @@ class WordCardTests(unittest.TestCase):
         (item,) = bank.values()
         self.assertEqual((item["kind"], item["topic"]), (learner_model.KIND_WORD, None))
         self.assertEqual(item["content"]["english"], "so far")  # the first pick's wording
+        self.assertEqual(item["content"]["transcription"], "/ˈsʌmθɪŋ/")
         self.assertEqual(len(item["occurrences"]), 2)
         self.assertFalse(learner_model.is_retired(item))
 

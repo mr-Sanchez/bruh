@@ -73,20 +73,15 @@ Views.practice = (() => {
             <span><strong>Курс A2 → C1</strong><br/>
               <span class="topic-meta">Уроки по порядку: грамматика, лексика, общение · продолжить с того места, где остановились</span></span>
           </a>
-          <a class="activity" href="#/record">
+          <a class="activity" href="#/speaking">
             <span class="activity-icon tone-gold">${Icons.mic}</span>
-            <span><strong>Монолог</strong><br/>
-              <span class="topic-meta">Свободная речь, запись и разбор${escapeHtml(price("analysis"))}</span></span>
+            <span><strong>Говорение</strong><br/>
+              <span class="topic-meta">Своя или предложенная тема, один дубль или серия: темп, паразиты, паузы, разбор по кнопке${escapeHtml(price("analysis"))}</span></span>
           </a>
           <a class="activity" href="#/picture">
             <span class="activity-icon tone-orange">${Icons.image}</span>
             <span><strong>Описание картинки</strong><br/>
               <span class="topic-meta">Голосом или текстом; что упущено и слова для сцены${escapeHtml(price("picture_analysis"))}</span></span>
-          </a>
-          <a class="activity" href="#/talk">
-            <span class="activity-icon tone-gold">${Icons.timer}</span>
-            <span><strong>60 секунд</strong><br/>
-              <span class="topic-meta">Минута на тему, три раза подряд: темп, паразиты, паузы · без ИИ ассистента</span></span>
           </a>
           <a class="activity" href="#/dictation">
             <span class="activity-icon tone-teal">${Icons.headphones}</span>

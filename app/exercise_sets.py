@@ -83,6 +83,8 @@ class VocabularyItem(BaseModel):
     example: str
     example_russian: str
     note: str = ""
+    # IPA of `english` (2026-09-27), shown on the pick list and the card's back.
+    transcription: str = ""
 
 
 class GeneratedSet(BaseModel):
@@ -162,7 +164,7 @@ class GenerationResult:
     exercises: List[Dict[str, Any]]
     call: ClaudeCall
     # Word card candidates: [{"id", "english", "russian", "example",
-    # "example_russian", "note"}], see assemble_vocabulary.
+    # "example_russian", "note", "transcription"}], see assemble_vocabulary.
     vocabulary: List[Dict[str, str]] = field(default_factory=list)
 
 
@@ -226,7 +228,9 @@ construction, such as "by the time", "so far"). No grammar notation or \
 formulas ("have + V3"), no very basic single words. `english`: the word or \
 phrase as it is learned ("reach out to someone", "a tight deadline"). \
 `russian`: its natural Russian equivalent - the front of the card, so it \
-must lead to this English and not to a looser synonym. `example`: a short \
+must lead to this English and not to a looser synonym. `transcription`: \
+the IPA transcription of `english` (General American), between slashes, \
+with stress marks ("/riːtʃ ˈaʊt tə ˈsʌmwʌn/"). `example`: a short \
 English sentence using it in the context. `example_russian`: that sentence \
 in Russian. `note`: optional, one short Russian remark - register, a typical \
 mistake of Russian speakers, or how it differs from a similar word; empty \
@@ -377,7 +381,7 @@ class ExerciseSetGenerator:
             gaps=config.SET_GAPS,
             fixes=config.SET_FIXES,
             translations=config.SET_TRANSLATIONS,
-            vocabulary=config.SET_VOCABULARY,
+            vocabulary=config.SET_VOCABULARY_ASKED,
         )
         user = _generation_request(topic, seeds, avoid, theme, lesson, known_words)
         logger.info("Exercise set requested: topic=%s, seeds=%d", topic["key"], len(seeds))
@@ -710,7 +714,7 @@ def assemble_exercises(parsed: GeneratedSet) -> List[Dict[str, Any]]:
 
 def assemble_vocabulary(parsed: GeneratedSet) -> List[Dict[str, str]]:
     """The set's word card candidates with stable ids (v1, v2...)."""
-    return clean_vocabulary(parsed.vocabulary, config.SET_VOCABULARY)
+    return clean_vocabulary(parsed.vocabulary, config.SET_VOCABULARY_ASKED)
 
 
 def clean_vocabulary(
@@ -737,6 +741,7 @@ def clean_vocabulary(
                 "example": entry.example.strip(),
                 "example_russian": entry.example_russian.strip(),
                 "note": entry.note.strip(),
+                "transcription": entry.transcription.strip(),
             }
         )
         if len(vocabulary) == limit:

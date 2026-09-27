@@ -23,6 +23,7 @@ structured outputs, Russian explanations, a `client_factory` for tests.
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
@@ -48,6 +49,20 @@ DIRECTIONS: Dict[str, Tuple[str, str]] = {DIRECTION_EN_RU: ("English", "Russian"
 LEVELS: Tuple[str, ...] = ("a2", "b1", "b2", "c1")
 DEFAULT_LEVEL = "b1"
 
+# What kind of text to write (2026-09-27). Left to Claude, every IT text
+# came out as the same first-person incident story, so the genre is picked
+# in code (pick_genre): key -> (what to write, Russian label).
+GENRES: Dict[str, Tuple[str, str]] = {
+    "email": ("a work email to a colleague, a manager or a client", "Письмо"),
+    "chat": ("one person's message in a work chat or a messenger", "Сообщение в чат"),
+    "blog": ("a short blog post sharing an opinion or a lesson learned", "Пост в блоге"),
+    "explainer": ("an explanation of how something works, for a newcomer", "Объяснение"),
+    "review": ("a review of a product, tool, service, book or course", "Отзыв"),
+    "announcement": ("an announcement or a notice to a team, users or customers", "Объявление"),
+    "advice": ("practical tips on how to do something better", "Советы"),
+    "story": ("a story of something that happened, told in the first person", "История"),
+}
+
 MistakeKind = Literal["grammar", "meaning", "omission", "addition", "word_choice", "spelling"]
 
 
@@ -55,6 +70,7 @@ MistakeKind = Literal["grammar", "meaning", "omission", "addition", "word_choice
 class WrittenText(BaseModel):
     title: str
     text: str
+    gist: str  # one English line on the plot, for later texts to avoid
 
 
 class TextMistake(BaseModel):
@@ -85,6 +101,7 @@ class WriteResult:
     title: str
     text: str
     call: ClaudeCall
+    gist: str = ""
 
 
 @dataclass
@@ -103,16 +120,19 @@ it into {target}.
 
 - `text`: {min_words}-{max_words} words of natural, authentic {source}, set \
 in the situations named on the request's "Context:" line and at the given \
-level. Pick a genre that fits the context and vary it between texts: a work \
-email or chat message, a short article or blog post, a story of something \
-that happened, an explanation of how something works, a review, an \
-announcement. Plain paragraphs separated by a blank line; no headings, \
-lists, markdown or dialogue scripts.
+level, in the genre named on the "Genre:" line. Plain paragraphs separated \
+by a blank line; no headings, lists, markdown or dialogue scripts.
 - Make it worth translating: everyday collocations, a few phrasal verbs and \
 set phrases, and a couple of spots a Russian speaker cannot translate word \
 for word - but nothing literary, rare or slangy for the level.
 - `title`: a short Russian name of the text, 2-6 words.
-- Do not write about the subjects of the titles listed as used before."""
+- `gist`: one English line, at most 15 words: the situation and the concrete \
+things in it ("payment service outage after a bad deployment, rolled back").
+- Earlier texts in this context are listed with their gists. The same field \
+and vocabulary are fine, but take a different situation - not one of them \
+retold with other details (a new outage after an outage is a retelling) - \
+with other people, systems and objects, and do not open the text the way \
+they did."""
 
 REVIEW_PROMPT = """You review a Russian-speaking learner's translation of a \
 {source} text into {target}. You get the original and the learner's \
@@ -149,11 +169,27 @@ phrases, first of all the ones the learner mistranslated, skipped or \
 translated clumsily. No very basic words, no grammar formulas. `english`: \
 the phrase as it is learned ("reach out to someone"); `russian`: its natural \
 {target} equivalent - the front of the card, so it must lead back to this \
-phrase; `example`: the original's sentence with it (shorten if long); \
+phrase; `transcription`: the IPA transcription of `english` (General \
+American), between slashes, with stress marks; `example`: the original's sentence with it (shorten if long); \
 `example_russian`: that sentence in {target}; `note`: optional, one short \
 Russian remark (register, a typical mistake), empty when there is nothing \
 useful to say.
 - Explanations (`summary`, `problem`, `why`, `note`) are Russian."""
+
+
+def pick_genre(recent_genres: Sequence[Optional[str]], rng: Optional[random.Random] = None) -> str:
+    """The genre for the next text: one not used in the context yet (at
+    random), else the one used longest ago. `recent_genres` are the latest
+    texts' genres, newest first (None for texts from before genres)."""
+    rng = rng or random.Random()
+    last_use: Dict[str, int] = {}
+    for position, genre in enumerate(recent_genres):
+        if genre in GENRES:
+            last_use.setdefault(genre, position)
+    unused = [genre for genre in GENRES if genre not in last_use]
+    if unused:
+        return rng.choice(unused)
+    return max(last_use, key=last_use.get)
 
 
 def direction_languages(direction: str) -> Tuple[str, str]:
@@ -189,20 +225,27 @@ class TextTranslator:
         size: str,
         level: str,
         theme: Optional[Dict[str, Optional[str]]] = None,
-        avoid_titles: Sequence[str] = (),
+        genre: str = "story",
+        recent: Sequence[Dict[str, Any]] = (),
         direction: str = DIRECTION_EN_RU,
     ) -> WriteResult:
-        """A new text of `size` words at `level`, in the context `theme`."""
+        """A new text of `size` words at `level`, in the context `theme` and
+        the genre `genre` (a GENRES key). `recent` are the latest texts in
+        the context ({"gist", "genre", "opening"}, newest first), so this one
+        tells a different situation and opens differently."""
         source, target = direction_languages(direction)
         low, high = size_words(size)
         lines = [
             f"Context: {themes.model_context(theme)}",
+            f"Genre: {GENRES.get(genre, GENRES['story'])[0]}",
             f"Level: {_LEVEL_NAMES.get(level, _LEVEL_NAMES[DEFAULT_LEVEL])}",
             f"Length: {low}-{high} words",
         ]
-        if avoid_titles:
-            lines += ["", "Titles used before - write about something else:"]
-            lines += [f"- {title}" for title in avoid_titles]
+        if recent:
+            lines += ["", "Earlier texts in this context (gist; how it opened):"]
+            for entry in recent:
+                opening = f'; opened "{entry["opening"]}..."' if entry.get("opening") else ""
+                lines.append(f"- {entry.get('gist', '')}{opening}")
         lines += ["", "Write the text."]
         logger.info("Translation text requested: size=%s, level=%s", size, level)
         response = self._call(
@@ -224,6 +267,7 @@ class TextTranslator:
             title=parsed.title.strip() or "Текст",
             text=text,
             call=_call_info(response, config.TEXT_WRITE_MODEL, config.TEXT_WRITE_EFFORT),
+            gist=parsed.gist.strip(),
         )
 
     def review(
@@ -233,19 +277,27 @@ class TextTranslator:
         *,
         direction: str = DIRECTION_EN_RU,
         phrase_prefix: str = "p",
+        known_phrases: Sequence[str] = (),
     ) -> ReviewResult:
-        """Review a translation of `text`; phrase ids get `phrase_prefix`."""
+        """Review a translation of `text`; phrase ids get `phrase_prefix`.
+        `known_phrases` are the learner's cards found in the text, so the
+        suggested phrases are other ones."""
         source, target = direction_languages(direction)
         request = (
             f"Original ({source}):\n{text.strip()}\n\n"
             f"Learner's translation ({target}):\n{translation.strip()}"
         )
+        if known_phrases:
+            request += (
+                "\n\nPhrases of the original the learner already has as cards - "
+                "suggest other ones:\n" + "; ".join(known_phrases)
+            )
         logger.info("Text translation review requested: %d chars", len(translation))
         response = self._call(
             model=config.TEXT_REVIEW_MODEL,
             max_tokens=config.TEXT_REVIEW_MAX_TOKENS,
             system=REVIEW_PROMPT.format(
-                source=source, target=target, phrases=config.TEXT_PHRASES
+                source=source, target=target, phrases=config.TEXT_PHRASES_ASKED
             ),
             messages=[{"role": "user", "content": request}],
             output_format=TextReview,
@@ -270,7 +322,7 @@ class TextTranslator:
         }
         return ReviewResult(
             review=review,
-            phrases=clean_vocabulary(parsed.phrases, config.TEXT_PHRASES, phrase_prefix),
+            phrases=clean_vocabulary(parsed.phrases, config.TEXT_PHRASES_ASKED, phrase_prefix),
             call=_call_info(response, config.TEXT_REVIEW_MODEL, config.TEXT_REVIEW_EFFORT),
         )
 

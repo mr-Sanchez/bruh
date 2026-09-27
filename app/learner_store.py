@@ -21,7 +21,8 @@ later switch from flat files to SQLite stays local to it. The files:
   data/word_picks.jsonl
                        append-only, AUTHORITATIVE - words and phrases the learner
                        picked from a set's vocabulary as word cards (or took
-                       back), the newest record per set + word wins;
+                       back, or deleted the card: "deleted": true), the newest
+                       record per set + word wins;
   data/theory/*.json   every version of a lesson's theory (paid, not rebuildable);
   data/lesson_tasks/*.json
                        spoken tasks Claude wrote for a lesson (paid, append-only);
@@ -44,6 +45,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -57,6 +59,7 @@ from app import (
     progress_store,
     roadmap,
     speech_drills,
+    text_store,
     theme_store,
     utils,
     verb_store,
@@ -886,16 +889,161 @@ def save_word_picks(
     }
 
 
-def known_words(limit: int = config.SET_KNOWN_WORDS) -> List[str]:
-    """The English of the learner's word cards, newest first, for a new set's
-    vocabulary to avoid."""
+def word_cards() -> List[Dict[str, Any]]:
+    """The learner's word cards (bank items of kind "word"), newest pick first."""
     items = [
         item
         for item in load_item_bank()["items"].values()
         if item.get("kind") == learner_model.KIND_WORD
     ]
     items.sort(key=lambda i: max(o["at"] for o in i["occurrences"]), reverse=True)
+    return items
+
+
+def _theme_key(theme: Any) -> Optional[str]:
+    if not isinstance(theme, dict):
+        return None
+    return theme.get("key") or (theme.get("label") or "").strip().lower() or None
+
+
+def known_words(
+    limit: int = config.SET_KNOWN_WORDS,
+    *,
+    topic: Optional[str] = None,
+    theme: Optional[Dict[str, Optional[str]]] = None,
+) -> List[str]:
+    """The English of the word cards a new set's vocabulary should avoid.
+
+    Only a hint for Claude (repeats are dropped in code anyway, see
+    fresh_vocabulary), so the list is short and picks the cards a set on
+    `topic` in `theme` would most likely repeat: those picked from sets on the
+    same topic, then from sets and texts in the same context, then the newest.
+    """
+    sources: Dict[str, tuple] = {
+        s["id"]: (s.get("topic"), _theme_key(s.get("theme"))) for s in list_sets()
+    }
+    sources.update(
+        {t["id"]: (None, _theme_key(t.get("theme"))) for t in text_store.list_texts()}
+    )
+    wanted_theme = _theme_key(theme)
+
+    def closeness(item: Dict[str, Any]) -> int:
+        best = 0
+        for occurrence in item["occurrences"]:
+            source_topic, source_theme = sources.get(occurrence.get("set_id"), (None, None))
+            if topic is not None and (source_topic == topic or item.get("lesson_id") == topic):
+                return 2
+            if wanted_theme is not None and source_theme == wanted_theme:
+                best = 1
+        return best
+
+    items = word_cards()  # newest first; the sort below is stable
+    items.sort(key=closeness, reverse=True)
     return [item["content"]["english"] for item in items[:limit]]
+
+
+def cards_in_text(text: str, limit: int = config.TEXT_KNOWN_PHRASES) -> List[str]:
+    """Word cards whose words all occur in `text` - the ones a review of its
+    translation could suggest again."""
+    stems = set(learner_model.word_stems(text))
+    found = [
+        item["content"]["english"]
+        for item in word_cards()
+        if (words := learner_model.word_stems(item["content"]["english"]))
+        and set(words) <= stems
+    ]
+    return found[:limit]
+
+
+def fresh_vocabulary(entries: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    """Freshly written word card candidates without the ones that repeat a
+    card, at most `limit`, renumbered (v1, v2... / r2-1, r2-2...) so the ids
+    stay dense. Overlaps are kept; annotate_vocabulary marks them."""
+    cards = word_cards()
+    kept = [
+        dict(entry)
+        for entry in entries
+        if not (
+            (match := learner_model.similar_card(entry.get("english") or "", cards))
+            and match["exact"]
+        )
+    ][:limit]
+    for number, entry in enumerate(kept, start=1):
+        prefix = re.sub(r"\d+$", "", str(entry.get("id") or ""))
+        entry["id"] = f"{prefix}{number}"
+    return kept
+
+
+def annotate_vocabulary(source_id: str, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Candidates of a set or text with `similar` - the card each one repeats
+    or overlaps ({"id", "english", "exact"}) - for the picker's hint. Worked
+    out on read, so it follows the cards as they change; entries that already
+    are cards from this source get no hint."""
+    cards = word_cards()
+    picked = set(picked_vocabulary(source_id))
+    annotated = []
+    for entry in entries:
+        entry = dict(entry)
+        if entry.get("id") not in picked:
+            match = learner_model.similar_card(entry.get("english") or "", cards)
+            if match is not None:
+                entry["similar"] = match
+        annotated.append(entry)
+    return annotated
+
+
+def word_card_list(today: Optional[dt.date] = None) -> List[Dict[str, Any]]:
+    """Every word card with its state and the other card it repeats or
+    overlaps (`similar`, or None), newest pick first - the «Мои слова» list."""
+    today = today or dt.date.today()
+    bank = load_item_bank()
+    states = item_states(bank)
+    cards = word_cards()
+    # Only cards sharing a word can overlap: compare within those, not n x n.
+    by_stem: Dict[str, List[Dict[str, Any]]] = {}
+    for item in cards:
+        for stem in set(learner_model.word_stems(item["content"]["english"])):
+            by_stem.setdefault(stem, []).append(item)
+    listed = []
+    for item in cards:
+        neighbours = {
+            other["id"]: other
+            for stem in set(learner_model.word_stems(item["content"]["english"]))
+            for other in by_stem.get(stem, [])
+        }
+        similar = learner_model.similar_card(
+            item["content"]["english"], list(neighbours.values()), skip_id=item["id"]
+        )
+        listed.append({**card(item, states[item["id"]], today), "similar": similar})
+    return listed
+
+
+def delete_word_card(card_id: str, now: Optional[dt.datetime] = None) -> int:
+    """Take a word card away wherever it was picked (a «remove» record per
+    live pick, so the log stays append-only). Returns how many picks that
+    was; 0 - no such card. Its attempts stay: picking it again brings them
+    back."""
+    ts = (now or dt.datetime.now()).isoformat(timespec="seconds")
+    with _picks_lock:
+        latest: Dict[tuple, Dict[str, Any]] = {}
+        for record in sorted(load_word_picks(), key=lambda r: r["ts"]):
+            latest[(record["set_id"], record.get("vocab_id"))] = record
+        live = [
+            record
+            for record in latest.values()
+            if record.get("action") == "add"
+            and learner_model.item_id(
+                learner_model.KIND_WORD, (record.get("word") or {}).get("english") or ""
+            )
+            == card_id
+        ]
+        for record in live:
+            utils.append_jsonl(
+                _picks_path(), {**record, "ts": ts, "action": "remove", "deleted": True}
+            )
+    if live:
+        rebuild_item_bank()
+    return len(live)
 
 
 def _set_mistake_items() -> List[Dict[str, Any]]:
@@ -1018,18 +1166,24 @@ def speech_report(session: utils.Session) -> Optional[Dict[str, Any]]:
 
 
 def drill_score(session: utils.Session, report: Dict[str, Any]) -> Optional[float]:
-    """The attempt score of a drill take, or None when it is not logged:
-    talk rounds after the first (practice), and talks in a language without
-    filler detection, whose fluency cannot be measured the same way."""
+    """The attempt score of a spoken take, or None when it is not logged.
+
+    Shadowing scores its reading. A monologue (and an older «60 секунд» take)
+    scores its fluency, but only as round 1 of its series - the spontaneous
+    take; later rounds are practice (2026-09-27: every English monologue
+    counts, not only a timed one). A language without filler detection has
+    no fluency score, so such a take is not logged."""
     if session.kind == config.KIND_SHADOWING:
         return report.get("reading", {}).get("score")
-    if session.kind == config.KIND_TALK and (session.drill or {}).get("round", 1) == 1:
+    spoken = (config.KIND_TALK, config.KIND_MONOLOGUE)
+    if session.kind in spoken and (session.drill or {}).get("round", 1) == 1:
         return report["metrics"].get("fluency_score")
     return None
 
 
 def record_speech_drill(session: utils.Session) -> Optional[Dict[str, Any]]:
-    """Log a transcribed drill take as a topic attempt on the fluency topic.
+    """Log a transcribed spoken take (a drill or a monologue) as a topic
+    attempt on the fluency topic.
 
     Runs after transcription; a take is never logged twice.
     """
@@ -1098,11 +1252,22 @@ def shadowing_passages(source_session_id: Optional[str] = None) -> List[Dict[str
     return passages
 
 
+def _series_takes() -> List[utils.Session]:
+    """Takes that belong to a series: «Говорение» monologues (their `drill`
+    names the series) and older «60 секунд» takes, oldest first."""
+    return [
+        s
+        for s in utils.list_sessions()
+        if s.kind == config.KIND_TALK
+        or (s.kind == config.KIND_MONOLOGUE and (s.drill or {}).get("series"))
+    ]
+
+
 def talk_series() -> List[Dict[str, Any]]:
-    """«60 секунд» takes grouped into series (same prompt, rounds 1..3),
-    newest first, each round with its measurements."""
+    """Spoken takes grouped into series (same prompt, rounds 1..N), newest
+    first, each round with its measurements. A prompt of None is an own topic."""
     series: Dict[str, Dict[str, Any]] = {}
-    for take in reversed(_drill_sessions(config.KIND_TALK)):
+    for take in reversed(_series_takes()):
         drill = take.drill or {}
         key = str(drill.get("series") or take.id)
         entry = series.setdefault(
@@ -1115,6 +1280,7 @@ def talk_series() -> List[Dict[str, Any]]:
                     key: drill.get(key) for key in ("prompt_id", "question", "hint", "theme")
                 },
                 "language": take.language_key,
+                "time_limit": drill.get("time_limit"),
                 "rounds": [],
             },
         )
@@ -1132,20 +1298,20 @@ def talk_series() -> List[Dict[str, Any]]:
 
 def talk_round(series_id: str) -> int:
     """The round number the next take of a series gets."""
-    return 1 + sum(
-        1
-        for take in _drill_sessions(config.KIND_TALK)
-        if (take.drill or {}).get("series") == series_id
-    )
+    return 1 + sum(1 for take in _series_takes() if take.drill.get("series") == series_id)
 
 
 def _speech_step(today: dt.date, sessions: List[utils.Session]) -> Optional[Dict[str, Any]]:
-    """The optional «Сегодня» step: a spoken warm-up - «60 секунд», or
-    shadowing a passage. Done once either drill was transcribed today."""
+    """The optional «Сегодня» step: a spoken warm-up - a «Говорение» series
+    (a second round said today), or shadowing a passage. Done once either was
+    transcribed today; an older «60 секунд» take counts too."""
     done = [
         s
         for s in sessions
-        if s.is_drill and s.status == utils.STATUS_DONE and s.started_at.date() == today
+        if (s.is_drill or (s.drill or {}).get("round", 1) >= 2)
+        and s.kind != config.KIND_PICTURE
+        and s.status == utils.STATUS_DONE
+        and s.started_at.date() == today
     ]
     if done:
         return {
@@ -1231,7 +1397,8 @@ def today_workout(now: Optional[dt.datetime] = None) -> Dict[str, Any]:
     }
 
     # 2. Live activity: a monologue on today's prompt, recorded and analysed.
-    # A picture description done today counts too: the slot is "speak once".
+    # A picture description done today counts too: the slot is "speak once",
+    # and so does any take of a «Говорение» series.
     # Spoken drills are not the live step: they are never analysed.
     sessions = utils.list_sessions()
     recorded = [s for s in sessions if s.status == utils.STATUS_DONE]

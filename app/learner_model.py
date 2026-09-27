@@ -28,10 +28,11 @@ daily allowance of new cards and never depend on speech.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 import re
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app import config, curriculum
 from app.utils import AnalysedSession
@@ -167,7 +168,8 @@ def items_from_word_picks(picks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any
     """Word cards from the pick log (data/word_picks.jsonl), one per live pick.
 
     A record is {"ts", "set_id", "vocab_id", "action": "add"|"remove", "word":
-    {"english", "russian", "example", "example_russian", "note"}, "lesson_id"}.
+    {"english", "russian", "example", "example_russian", "note", "transcription"},
+    "lesson_id"}; picks made before 2026-09-27 have no transcription.
     The newest record per (set, word) wins, so «убрать» after «добавить» takes
     the card away. The same English picked from two sets is one card (the id is
     a hash of the English) with two occurrences.
@@ -190,7 +192,9 @@ def items_from_word_picks(picks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any
                 "lesson_id": pick.get("lesson_id"),
                 "content": {
                     field: (word.get(field) or "").strip()
-                    for field in ("english", "russian", "example", "example_russian", "note")
+                    for field in (
+                        "english", "russian", "example", "example_russian", "note", "transcription"
+                    )
                 },
                 "occurrences": [
                     {"pick": f"{set_id}#{vocab_id}", "set_id": set_id, "at": pick["ts"]}
@@ -198,6 +202,91 @@ def items_from_word_picks(picks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any
             }
         )
     return items
+
+
+# ------------------------------------------------------- word card overlap
+# Suggested words must not repeat the learner's cards (2026-09-27). Sending
+# every card to Claude would grow the prompt without bound and a long "avoid"
+# list is followed poorly, so the check is done here, for free: a suggestion
+# whose words match a card is dropped, and one that overlaps a card ("roll
+# back" / "roll back a release") is shown with a hint - the learner decides.
+# Crude on purpose: no dictionary, only lowercase, fillers and a few endings.
+_WORD_TOKEN = re.compile(r"[a-z]+(?:'[a-z]+)?")
+# Placeholders and articles that do not make a phrase a different card:
+# "make up one's mind" = "make up your mind", "reach out to someone" =
+# "reach out to somebody".
+_WORD_FILLERS: frozenset = frozenset(
+    {
+        "a", "an", "the", "someone", "somebody", "something", "sb", "sth", "smb", "smth",
+        "one's", "one", "my", "your", "his", "her", "its", "our", "their",
+    }
+)
+
+
+def _stem(token: str) -> str:
+    """A rough stem, so "releases", "released" and "release" meet."""
+    if token.endswith("'s"):
+        token = token[:-2]
+    if len(token) > 4 and token.endswith("ies"):
+        token = token[:-3] + "y"
+    elif token.endswith("sses"):
+        token = token[:-2]
+    elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        token = token[:-1]
+    for suffix in ("ing", "ed"):
+        if len(token) > len(suffix) + 2 and token.endswith(suffix):
+            token = token[: -len(suffix)]
+            break
+    if len(token) > 3 and token.endswith("e"):
+        token = token[:-1]
+    return token
+
+
+@functools.lru_cache(maxsize=8192)
+def word_stems(text: str) -> Tuple[str, ...]:
+    """The stems of a phrase's words, fillers and "(verb)"-style notes left out.
+    Cached: a list of cards compares every card with every other one."""
+    value = _PARENTHESES.sub("", (text or "").translate(_QUOTE_CHARS).lower())
+    return tuple(_stem(t) for t in _WORD_TOKEN.findall(value) if t not in _WORD_FILLERS)
+
+
+def word_key(text: str) -> str:
+    """Two phrases with the same key are the same card to learn."""
+    return " ".join(word_stems(text))
+
+
+def similar_card(
+    english: str, cards: Sequence[Dict[str, Any]], *, skip_id: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """The word card `english` repeats or overlaps, or None.
+
+    `cards` are word items; `skip_id` is left out (a card compared with the
+    others, or a suggestion that already is this card). Returns {"id",
+    "english", "exact"}: exact - the same words; otherwise one phrase's words
+    all occur in the other ("deadline" / "a tight deadline"). An exact match
+    wins over an overlap, a closer overlap over a looser one.
+    """
+    stems = word_stems(english)
+    if not stems:
+        return None
+    key, mine = " ".join(stems), set(stems)
+    best: Optional[Dict[str, Any]] = None
+    best_gap = 0
+    for card in cards:
+        if card.get("id") == skip_id:
+            continue
+        theirs_list = word_stems((card.get("content") or {}).get("english") or "")
+        if not theirs_list:
+            continue
+        found = {"id": card["id"], "english": card["content"]["english"]}
+        if " ".join(theirs_list) == key:
+            return {**found, "exact": True}
+        theirs = set(theirs_list)
+        if mine <= theirs or theirs <= mine:
+            gap = len(mine ^ theirs)
+            if best is None or gap < best_gap:
+                best, best_gap = {**found, "exact": False}, gap
+    return best
 
 
 def _occurrence_key(occurrence: Dict[str, Any]) -> Any:

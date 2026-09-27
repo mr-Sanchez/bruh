@@ -32,7 +32,8 @@ Views.progress = (() => {
     if (!progress.sessions_analyzed && !progress.score_history.length) {
       container.innerHTML = `<div class="card"><h2>Прогресс</h2><div class="empty-state">
         Пока нет данных. Запишите и проанализируйте монолог — здесь появятся оценки, темы и банк ошибок.
-      </div></div>${renderCourse(course)}`;
+      </div></div>${renderCourse(course)}<div data-role="words"></div>`;
+      mountWords(container.querySelector('[data-role="words"]'));
       return;
     }
 
@@ -58,7 +59,9 @@ Views.progress = (() => {
         <h2>Банк ошибок</h2>
         ${renderMistakes(fixes.items, labels)}
       </div>
+      <div data-role="words"></div>
       ${renderUsage(usage)}`;
+    mountWords(container.querySelector('[data-role="words"]'));
 
     const charts = container.querySelector("#charts");
     const history = Charts.sortedHistory(progress.score_history);
@@ -195,7 +198,8 @@ Views.progress = (() => {
       </div>`;
   }
 
-  // «60 секунд»: every series, its first (spontaneous) take against its last.
+  // Series of «Говорение» takes (and older «60 секунд» ones): the first
+  // (spontaneous) take against the last.
   // Dictation is not part of the topic taxonomy (it trains listening and
   // spelling), so it gets its own numbers plus the words that keep going
   // wrong - each with the same free references as a phrase card.
@@ -235,8 +239,8 @@ Views.progress = (() => {
   }
 
   function renderTalks(talks) {
-    const series = ((talks && talks.series) || []).filter((s) =>
-      s.rounds.some((r) => r.metrics && r.metrics.words)
+    const series = ((talks && talks.series) || []).filter(
+      (s) => s.rounds.filter((r) => r.metrics && r.metrics.words).length >= 2
     );
     if (!series.length) return "";
     const cell = (round, pick) =>
@@ -244,11 +248,11 @@ Views.progress = (() => {
     return `
       <div class="card">
         <h2>Речевая разминка</h2>
-        <p class="muted">«60 секунд»: первая попытка — спонтанная речь (она идёт в зачёт темы
-          «беглость»), последняя — после двух повторов той же мысли.</p>
+        <p class="muted">Серии дублей: первый — спонтанная речь (он идёт в зачёт темы
+          «беглость»), последний — после повторов той же мысли.</p>
         <div class="table-wrap">
           <table class="data-table">
-            <thead><tr><th>Дата</th><th>Попыток</th>
+            <thead><tr><th>Дата</th><th>Дублей</th>
               <th>Темп 1 → N</th><th>Паразиты/мин 1 → N</th><th>Паузы 1 → N</th></tr></thead>
             <tbody>${series
               .map((entry) => {
@@ -308,6 +312,89 @@ Views.progress = (() => {
         </details>`
         )
         .join("")}`;
+  }
+
+  // «Мои слова»: every word card, searchable, with the card it repeats or
+  // overlaps, so duplicates can be found and deleted by hand. Loaded on its
+  // own - the rest of the page does not wait for it.
+  async function mountWords(host) {
+    let words;
+    try {
+      words = (await Api.getWordCards()).words;
+    } catch (err) {
+      host.innerHTML = `<div class="card"><h2>Мои слова</h2><p class="muted">Не удалось загрузить: ${escapeHtml(err.message)}</p></div>`;
+      return;
+    }
+    if (!words.length) {
+      host.innerHTML = "";
+      return;
+    }
+    const similarCount = words.filter((w) => w.similar).length;
+    host.innerHTML = `
+      <div class="card">
+        <h2>Мои слова</h2>
+        <p class="muted">Карточек: ${words.length}${similarCount ? ` · с похожими: ${similarCount}` : ""}.
+          Удалённая карточка пропадает из тренировок; если выбрать это слово снова, его история вернётся.</p>
+        <div class="words-filter">
+          <input type="search" data-role="words-search" placeholder="Найти слово или перевод" />
+          ${
+            similarCount
+              ? `<label class="words-only-similar"><input type="checkbox" data-role="words-similar" /> только похожие</label>`
+              : ""
+          }
+        </div>
+        <ul class="vocab-list" data-role="words-list"></ul>
+      </div>`;
+    const search = host.querySelector('[data-role="words-search"]');
+    const onlySimilar = host.querySelector('[data-role="words-similar"]');
+    const list = host.querySelector('[data-role="words-list"]');
+    const draw = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = words.filter(
+        (w) =>
+          (!onlySimilar || !onlySimilar.checked || w.similar) &&
+          (!q || `${w.content.english} ${w.content.russian}`.toLowerCase().includes(q))
+      );
+      // Near-duplicates sit next to each other: sorted by the pair's English.
+      if (onlySimilar && onlySimilar.checked) {
+        const pairKey = (w) => [w.content.english, w.similar.english].sort().join("|").toLowerCase();
+        shown.sort((a, b) => pairKey(a).localeCompare(pairKey(b)));
+      }
+      list.innerHTML = shown.length
+        ? shown
+            .map(
+              (w) => `
+          <li class="word-row">
+            <span>
+              <span class="phrase">${escapeHtml(w.content.english)}</span>
+              ${w.content.transcription ? `<span class="transcription">${escapeHtml(w.content.transcription)}</span>` : ""}
+              <span class="muted">— ${escapeHtml(w.content.russian)}</span>
+              <span class="topic-meta"> · ${stateText(w.state)}</span>
+              ${Drill.similarHint(w.similar)}
+            </span>
+            <button type="button" class="link-button" data-delete="${escapeHtml(w.id)}">удалить</button>
+          </li>`
+            )
+            .join("")
+        : `<li class="muted">Ничего не найдено.</li>`;
+      list.querySelectorAll("[data-delete]").forEach((button) =>
+        Drill.armDelete(button, async () => {
+          await Api.deleteWordCard(button.dataset.delete);
+          // Hints of the remaining cards change too: reload the block.
+          const keepQuery = search.value;
+          const keepSimilar = onlySimilar && onlySimilar.checked;
+          await mountWords(host);
+          const again = host.querySelector('[data-role="words-search"]');
+          const againSimilar = host.querySelector('[data-role="words-similar"]');
+          if (again) again.value = keepQuery;
+          if (againSimilar) againSimilar.checked = keepSimilar;
+          if (again) again.dispatchEvent(new Event("input"));
+        })
+      );
+    };
+    search.addEventListener("input", draw);
+    if (onlySimilar) onlySimilar.addEventListener("change", draw);
+    draw();
   }
 
   function renderUsage(usage) {

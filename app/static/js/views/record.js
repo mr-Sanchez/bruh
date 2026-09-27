@@ -1,14 +1,11 @@
-// Record view: browser microphone capture (MediaRecorder) -> upload -> poll
-// for the transcript -> on-demand Claude analysis. Replaces the old
-// sounddevice/Tkinter recording loop; the same overall states apply
-// (ready -> recording -> transcribing -> done/error).
-//
-// The same view runs the picture description (#/picture, Views.picture at the
-// bottom): a picture is chosen, downscaled in the browser and uploaded with
-// the take, which can be spoken (default) or typed.
+// One take -> upload -> poll for the transcript -> on-demand Claude analysis,
+// for the picture description (#/picture: a picture is chosen, downscaled in
+// the browser and uploaded with the take, which can be spoken or typed) and a
+// roadmap lesson's spoken task (#/speak/<lesson>:<task>). The free monologue
+// moved to «Говорение» (speech.js) on 2026-09-27.
 window.Views = window.Views || {};
 
-Views.record = (() => {
+const RecordView = (() => {
   let recorder = null;
   let pollTimer = null;
   let container = null;
@@ -96,23 +93,19 @@ Views.record = (() => {
         1–2 минуты. После анализа ИИ ассистент подскажет, что вы не упомянули, и даст слова для этой сцены.</p>`;
   }
 
-  // `param` is a speaking-prompt id when the view is opened from «Сегодня»
-  // (#/record/<theme>:<n>); a plain #/record is a free monologue. `mode` is
-  // "picture" for the picture description.
+  // `mode` is "picture" or "lesson" (`param` = <lesson>:<task>).
   async function render(root, param, mode) {
     container = root;
     const picture = mode === "picture";
     // A lesson's spoken task (#/speak/<lesson>:<task>): a monologue on that task.
     const [lessonId, taskId] =
       mode === "lesson" && param ? decodeURIComponent(param).split(":") : [null, null];
-    const promptId = !picture && !lessonId && param ? decodeURIComponent(param) : null;
     container.appendChild(
       el(`
-      ${promptId == null ? "" : `<p><a href="#/today">← Сегодня</a></p>`}
       ${picture ? `<p><a href="#/practice">← Занятия</a></p>` : ""}
       ${lessonId ? `<p><a href="#/practice/${encodeURIComponent(lessonId)}">← К уроку</a></p>` : ""}
       <div class="card">
-        <h2>${picture ? "Описание картинки" : lessonId ? "Устное задание урока" : "Монолог"}</h2>
+        <h2>${picture ? "Описание картинки" : "Устное задание урока"}</h2>
         <div id="prompt-slot"></div>
         ${picture ? pictureCard() : ""}
         <p class="muted" id="voice-hint">Говорите свободно — слова-паразиты, паузы, ошибки и незаконченные фразы
@@ -198,15 +191,6 @@ Views.record = (() => {
         slot.innerHTML = `<p class="muted">Задание не загрузилось: ${escapeHtml(err.message)}</p>`;
       }
       if (!lessonTask) startBtn.disabled = true;
-    }
-
-    if (promptId != null) {
-      ThemePicker.mountPrompts(container.querySelector("#prompt-slot"), {
-        promptId,
-        note: "Говорите 1–3 минуты. Потом нажмите «Анализировать» — ошибки попадут в карточки.",
-      }).catch((err) => {
-        container.querySelector("#prompt-slot").innerHTML = `<p class="muted">Темы не загрузились: ${escapeHtml(err.message)}</p>`;
-      });
     }
 
     const warnings = [];
@@ -467,13 +451,12 @@ Views.record = (() => {
   return { render, dispose };
 })();
 
-// «Описание картинки» (#/picture): the recorder in picture mode.
 Views.speak = {
-  render: (container, param) => Views.record.render(container, param, "lesson"),
-  dispose: () => Views.record.dispose(),
+  render: (container, param) => RecordView.render(container, param, "lesson"),
+  dispose: () => RecordView.dispose(),
 };
 
 Views.picture = {
-  render: (container, param) => Views.record.render(container, param, "picture"),
-  dispose: () => Views.record.dispose(),
+  render: (container, param) => RecordView.render(container, param, "picture"),
+  dispose: () => RecordView.dispose(),
 };

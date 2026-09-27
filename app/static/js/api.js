@@ -98,7 +98,7 @@ const Api = (() => {
       return request("/api/sessions", { method: "POST", body: form });
     },
 
-    // Spoken drills: passages to shadow, «60 секунд» series with measurements.
+    // Spoken drills: passages to shadow, «Говорение» series with measurements.
     getPassages: () => request("/api/speech/passages"),
     getTalks: () => request("/api/speech/talks"),
 
@@ -114,6 +114,11 @@ const Api = (() => {
       if (dueOnly) params.set("due_only", "true");
       return request(`/api/learner/items?${params}`);
     },
+    // Word cards with the card each one repeats or overlaps; deleting one ($0)
+    // takes it out of every deck it was picked into.
+    getWordCards: () => request("/api/learner/words"),
+    deleteWordCard: (id) =>
+      request(`/api/learner/words/${encodeURIComponent(id)}`, { method: "DELETE" }),
     // Claude checks one translation card's answer (the attempt is posted separately).
     checkCard: (itemId, drill, answer) =>
       request(`/api/learner/cards/${encodeURIComponent(itemId)}/check`, {

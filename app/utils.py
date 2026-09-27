@@ -57,8 +57,10 @@ class Session:
     input_mode: str = config.INPUT_VOICE
     # Set for picture descriptions only: "image" + the sniffed extension.
     image_filename: Optional[str] = None
-    # Spoken drills only: what was practised (talk: prompt, series, round;
-    # shadowing: the source recording, passage and its reference text).
+    # What a spoken take practised. A «Говорение» monologue: its prompt (None
+    # for an own topic), time limit, series, round and silences (older talk
+    # takes: the same without the limit); shadowing: the source recording,
+    # passage and its reference text. None for a plain monologue or picture.
     drill: Optional[Dict[str, Any]] = None
     # A roadmap lesson's spoken task (Stage 8, R6): {"id", "task": {"id",
     # "question", "hint", "use", "theme"}} - the task as it was shown.

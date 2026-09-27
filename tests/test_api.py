@@ -802,13 +802,13 @@ class ApiTests(unittest.TestCase):
     def _drill_attempts(self) -> List[Dict]:
         from app import learner_store
 
-        return [a for a in learner_store.load_attempts() if a["exercise"] in ("talk", "shadowing")]
+        return [a for a in learner_store.load_attempts() if a["exercise"] in ("monologue", "shadowing")]
 
-    def test_a_talk_series_logs_only_its_first_round(self) -> None:
+    def test_a_speaking_series_logs_only_its_first_round(self) -> None:
         self._hear("So uh I think we should ship it today", gaps={4: 3.0})
-        first = self._upload_drill("talk", prompt_id="travel:2")
+        first = self._upload_drill("monologue", prompt_id="travel:2", time_limit="60")
         detail = self.client.get(f"/api/sessions/{first['session_id']}").json()
-        self.assertEqual(detail["kind"], "talk")
+        self.assertEqual(detail["kind"], "monologue")
         question, hint = themes.THEME_BY_KEY["travel"].prompts[2]
         self.assertEqual(
             detail["drill"],
@@ -817,6 +817,7 @@ class ApiTests(unittest.TestCase):
                 "question": question,
                 "hint": hint,
                 "theme": {"key": "travel", "label": "Путешествия"},
+                "time_limit": 60,
                 "series": first["session_id"],
                 "round": 1,
             },
@@ -828,49 +829,75 @@ class ApiTests(unittest.TestCase):
 
         attempts = self._drill_attempts()
         self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["exercise"], "monologue")
         self.assertEqual(attempts[0]["topic"], config.FLUENCY_TOPIC)
         self.assertEqual(attempts[0]["score"], metrics["fluency_score"])
         self.assertEqual(attempts[0]["session_id"], first["session_id"])
 
-        # Rounds 2 and 3 take the prompt of the series, whatever is sent.
+        # Later rounds take the prompt and limit of the series, whatever is sent.
         for expected_round in (2, 3):
-            take = self._upload_drill("talk", prompt_id="news:1", series=first["session_id"])
+            take = self._upload_drill(
+                "monologue", prompt_id="news:1", time_limit="180", series=first["session_id"]
+            )
             drill = self.client.get(f"/api/sessions/{take['session_id']}").json()["drill"]
-            self.assertEqual((drill["round"], drill["prompt_id"]), (expected_round, "travel:2"))
+            self.assertEqual(
+                (drill["round"], drill["prompt_id"], drill["time_limit"]),
+                (expected_round, "travel:2", 60),
+            )
         self.assertEqual(len(self._drill_attempts()), 1)
 
         series = self.client.get("/api/speech/talks").json()["series"]
         self.assertEqual(len(series), 1)
         self.assertEqual([r["round"] for r in series[0]["rounds"]], [1, 2, 3])
-        self.assertEqual(series[0]["prompt"]["hint"], hint)
+        self.assertEqual((series[0]["prompt"]["hint"], series[0]["time_limit"]), (hint, 60))
         self.assertEqual(series[0]["rounds"][0]["metrics"]["fillers"], 1)
 
         usage = self.client.get("/api/usage").json()["by_purpose"]
-        self.assertEqual(usage["deepgram:speech_drill"]["calls"], 3)
+        self.assertEqual(usage["deepgram:transcription"]["calls"], 3)
 
-    def test_talk_takes_are_validated(self) -> None:
-        self._upload_drill("talk", expect=400)
+    def test_an_own_topic_take_is_a_series_of_its_own_and_can_be_analysed(self) -> None:
+        self._hear("Well I like to cook on weekends")
+        take = self._upload_drill("monologue", silences="[]")
+        detail = self.client.get(f"/api/sessions/{take['session_id']}").json()
+        self.assertEqual(
+            {k: detail["drill"][k] for k in ("prompt_id", "time_limit", "series", "round")},
+            {"prompt_id": None, "time_limit": None, "series": take["session_id"], "round": 1},
+        )
+        self.assertEqual(len(self._drill_attempts()), 1)
+        response = self.client.post(f"/api/sessions/{take['session_id']}/analyze")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.fake_analyzer.calls, 1)
+
+    def test_a_plain_english_monologue_counts_for_fluency_too(self) -> None:
+        self._hear("So uh I think we should ship it today")
+        take = self._upload_session()
+        self.assertIsNone(self.client.get(f"/api/sessions/{take['session_id']}").json()["drill"])
+        attempts = self._drill_attempts()
+        self.assertEqual([(a["exercise"], a["session_id"]) for a in attempts],
+                         [("monologue", take["session_id"])])
+
+    def test_speaking_takes_are_validated(self) -> None:
         for bad in ("it_backend:99", "no_such:0", "own_1:0", "it_backend", "x"):
-            self._upload_drill("talk", expect=400, prompt_id=bad)
-        monologue = self._upload_session()
-        self._upload_drill(
-            "talk", expect=400, prompt_id="it_backend:0", series=monologue["session_id"]
-        )
-        self._upload_drill(
-            "talk", expect=404, prompt_id="it_backend:0", series="2020-01-01_00-00-00"
-        )
-        self._upload_drill("talk", expect=400, prompt_id="it_backend:0", series="..")
+            self._upload_drill("monologue", expect=400, prompt_id=bad)
+        for bad in ("30", "61", "0"):
+            self._upload_drill("monologue", expect=400, time_limit=bad)
+        plain = self._upload_session()
+        self._upload_drill("monologue", expect=400, series=plain["session_id"])
+        self._upload_drill("monologue", expect=404, series="2020-01-01_00-00-00")
+        self._upload_drill("monologue", expect=400, series="..")
+        # «60 секунд» is no longer a kind of its own.
+        self._upload_drill("talk", expect=400, prompt_id="it_backend:0")
         typed = self.client.post(
-            "/api/sessions", data={"kind": "talk", "text": "hello", "prompt_id": "it_backend:0"}
+            "/api/sessions", data={"text": "hello", "prompt_id": "it_backend:0"}
         )
         self.assertEqual(typed.status_code, 400)
 
-    def test_a_talk_measures_pauses_by_the_silences_sent_with_it(self) -> None:
+    def test_a_take_measures_pauses_by_the_silences_sent_with_it(self) -> None:
         # Words every 0.5 s: Deepgram's timings show no gap at all, the audio
         # has 1.2 s of quiet inside the sentence (before "ship").
         self._hear("So I think we should ship it today")
         take = self._upload_drill(
-            "talk", prompt_id="it_backend:0", silences="[[1.8, 3.0], [0, 0.4], [4.5, 9]]"
+            "monologue", prompt_id="it_backend:0", silences="[[1.8, 3.0], [0, 0.4], [4.5, 9]]"
         )
         detail = self.client.get(f"/api/sessions/{take['session_id']}").json()
         self.assertEqual(detail["drill"]["silences"], [[0.0, 0.4], [1.8, 3.0], [4.5, 9.0]])
@@ -882,24 +909,44 @@ class ApiTests(unittest.TestCase):
     def test_malformed_silences_are_refused(self) -> None:
         self._hear("Okay")
         for bad in ("nope", "{}", "[[1]]", "[[3, 2]]", "[[-1, 2]]", '[["a", 2]]'):
-            self._upload_drill("talk", expect=400, prompt_id="it_backend:0", silences=bad)
+            self._upload_drill("monologue", expect=400, prompt_id="it_backend:0", silences=bad)
 
-    def test_a_talk_without_filler_detection_is_not_scored(self) -> None:
+    def test_a_take_without_filler_detection_is_not_scored(self) -> None:
         self._hear("Я думаю что да")
-        take = self._upload_drill("talk", prompt_id="it_backend:0", language="ru")
+        take = self._upload_drill("monologue", prompt_id="it_backend:0", language="ru")
         detail = self.client.get(f"/api/sessions/{take['session_id']}").json()
         self.assertIsNone(detail["speech"]["metrics"]["fillers"])
         self.assertEqual(self._drill_attempts(), [])
 
-    def test_drills_are_not_analysed_and_do_not_fill_the_live_step(self) -> None:
+    def test_a_second_round_is_the_warm_up_and_the_series_the_live_step(self) -> None:
         self._hear("Okay let me try this")
-        take = self._upload_drill("talk", prompt_id="it_backend:0")
+        first = self._upload_drill("monologue", prompt_id="it_backend:0", time_limit="60")
+        steps = {s["kind"]: s for s in self.client.get("/api/learner/today").json()["steps"]}
+        self.assertEqual(steps["monologue"]["status"], "analyze")
+        self.assertNotIn("speech", steps)  # no Deepgram key: the warm-up is not offered
+        with patch.object(config, "get_api_key", return_value="dg-key"):
+            steps = {s["kind"]: s for s in self.client.get("/api/learner/today").json()["steps"]}
+            self.assertEqual(steps["speech"]["status"], "todo")
+            second = self._upload_drill("monologue", series=first["session_id"])
+            steps = {s["kind"]: s for s in self.client.get("/api/learner/today").json()["steps"]}
+            self.assertEqual(
+                (steps["speech"]["status"], steps["speech"]["session_id"]),
+                ("done", second["session_id"]),
+            )
+
+    def test_an_older_talk_take_is_still_read_but_not_analysed(self) -> None:
+        from app import learner_store, utils
+
+        self._hear("Okay let me try this")
+        take = self._upload_drill("monologue", prompt_id="it_backend:0")
+        session = next(s for s in utils.list_sessions() if s.id == take["session_id"])
+        session.kind = config.KIND_TALK
+        utils.write_session_meta(session)
         response = self.client.post(f"/api/sessions/{take['session_id']}/analyze")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.fake_analyzer.calls, 0)
-        steps = {s["kind"]: s for s in self.client.get("/api/learner/today").json()["steps"]}
-        self.assertEqual(steps["monologue"]["status"], "todo")
-        self.assertEqual(steps["speech"]["status"], "done")
+        series = learner_store.talk_series()
+        self.assertEqual([r["session_id"] for r in series[0]["rounds"]], [take["session_id"]])
 
     def test_shadowing_reads_a_passage_of_the_improved_version(self) -> None:
         source = self._analyzed_session()
@@ -1174,9 +1221,53 @@ class ApiTests(unittest.TestCase):
         queue = self.client.get("/api/learner/queue").json()
         self.assertEqual([i["content"]["english"] for i in queue["new"] if i["kind"] == "word"],
                          ["so far"])
-        # The next set is told which words are already cards.
-        self._create_set(force=True)
+        # The next set is told which words are already cards (the ones from
+        # sets on its topic first), and a suggestion repeating one is dropped.
+        again = self._create_set(force=True)
         self.assertEqual(self.fake_generator.generated[-1]["known_words"], ["so far"])
+        self.assertEqual([(v["id"], v["english"]) for v in again["set"]["vocabulary"]],
+                         [("v1", "roll back a release")])
+
+    def test_word_cards_list_their_overlaps_and_can_be_deleted(self) -> None:
+        first = self._create_set()
+        set_id = first["set"]["id"]
+        url = f"/api/practice/sets/{set_id}/vocabulary"
+        self.client.put(url, json={"picked": ["v1"]})  # "roll back a release"
+        # A later set suggests "roll back": kept, with a hint about the card.
+        with patch.object(FakeGenerator, "generate", autospec=True) as generate:
+            generate.return_value = GenerationResult(
+                intro="", exercises=[dict(SET_EXERCISES[0], after=" it (2).")],
+                call=ClaudeCall(model=config.EXERCISE_SET_MODEL, usage={}),
+                vocabulary=[{"id": "v1", "english": "roll back", "russian": "откатить",
+                             "example": "", "example_russian": "", "note": ""}],
+            )
+            second = self._create_set(force=True)
+        (entry,) = second["set"]["vocabulary"]
+        self.assertEqual(entry["similar"]["english"], "roll back a release")
+        self.assertFalse(entry["similar"]["exact"])
+        self.client.put(f"/api/practice/sets/{second['set']['id']}/vocabulary",
+                        json={"picked": ["v1"]})
+        # Picked, it is a card of that set and carries no hint there.
+        shown = self.client.get(f"/api/practice/sets/{second['set']['id']}").json()
+        self.assertNotIn("similar", shown["set"]["vocabulary"][0])
+
+        words = self.client.get("/api/learner/words").json()
+        self.assertEqual(words["count"], 2)
+        by_english = {w["content"]["english"]: w for w in words["words"]}
+        self.assertEqual(by_english["roll back"]["similar"]["english"], "roll back a release")
+        self.assertEqual(by_english["roll back a release"]["similar"]["english"], "roll back")
+
+        card_id = by_english["roll back a release"]["id"]
+        self.assertEqual(self.client.delete("/api/learner/words/wrd-xyz").status_code, 400)
+        deleted = self.client.delete(f"/api/learner/words/{card_id}").json()
+        self.assertEqual(deleted["removed_picks"], 1)
+        self.assertEqual(self.client.delete(f"/api/learner/words/{card_id}").status_code, 404)
+        words = self.client.get("/api/learner/words").json()["words"]
+        self.assertEqual([(w["content"]["english"], w["similar"]) for w in words],
+                         [("roll back", None)])
+        # Its set no longer counts it as picked.
+        self.assertEqual(self.client.get(f"/api/practice/sets/{set_id}").json()
+                         ["picked_vocabulary"], [])
 
     def test_lesson_of_the_day_follows_the_mistakes_and_its_next_action(self) -> None:
         self._analyzed_session()  # a mistake on present_perfect

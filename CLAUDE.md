@@ -59,8 +59,8 @@ app/static/css/app.css  «Закат» dark theme: colour tokens on :root, sideb
 
 Library modules stay framework-agnostic and are built through factory dependencies
 (`get_transcriber_factory`, `get_analyzer_factory`, `get_fetcher_factory`) so tests can
-override them. Some views register several `Views.*` (record.js → picture; speech.js → talk,
-shadowing).
+override them. Some views register several `Views.*` (record.js → picture, speak; speech.js → speaking,
+shadowing, and the older record / talk links).
 
 ### Data on disk (runtime, gitignored)
 
@@ -102,13 +102,20 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
 * **Lesson spoken task:** a monologue with `lesson_id` + `task_id` (`session.json` `lesson`);
   `/analyze` checks the lesson's rule (`analysis.json` `lesson.check`) and logs one
   `lesson_task` attempt per take.
-* **Spoken drills** (`kind=talk` / `kind=shadowing`, details in `session.json`'s `drill`):
-  measured, not analysed; one `filler_words_fluency` attempt is logged, `/analyze` refuses them.
+* **«Говорение»** (`#/speaking`, 2026-09-27: «Монолог» + «60 секунд» merged): a monologue
+  with an optional `prompt_id`, `time_limit` (60/120/180) and, from round 2, `series`, all kept
+  in `session.json`'s `drill`; later rounds copy the first take's prompt and limit. Every take
+  can be analysed. Round 1 of any English monologue logs one `filler_words_fluency` attempt.
+* **Shadowing** (`kind=shadowing`, details in `drill`): measured, not analysed; one
+  `filler_words_fluency` attempt is logged, `/analyze` refuses it (and older `kind=talk` takes,
+  no longer created).
   Pauses come from silence spans the browser finds in the audio (`Recorder.findSilences`,
   sent as `silences`, kept in `drill`) - Deepgram's word ends swallow pauses; word gaps
   are only the fallback for older takes.
 * **Text translation** (`#/translate`): `POST /api/translate/texts` (Claude writes an English
-  text in a «уклон» at a size of 5/10/15 min) or `.../texts/custom` (pasted, free) →
+  text in a «уклон» at a size of 5/10/15 min; the genre is picked in code - `pick_genre`, least
+  recently used in the context - and the last 20 texts' gists + openings go along so plots
+  don't repeat) or `.../texts/custom` (pasted, free) →
   `POST .../<id>/review` (Sonnet: accuracy, mistakes, unnatural spots, final version, phrases;
   text saved before Claude is asked, same text reuses the review) → `PUT .../<id>/phrases`
   picks word cards through the shared `word_picks.jsonl` (`set_id` = the text id). Stays out
@@ -141,8 +148,8 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
   hashes (`learner_model.item_id`) so attempts survive re-analysis.
 * **Session ids come from the URL** — `_session_directory()` rejects `/`, `\`, `.`, `..`;
   keep that guard on any new session-scoped route.
-* **Spoken drills never call Claude.** Only the first round of a «60 секунд» series is an
-  attempt; a talk without filler detection (non-English) is not scored.
+* **Measuring speech never calls Claude** (only «Анализировать» does). Only round 1 of a
+  series is a fluency attempt; a take without filler detection (non-English) is not scored.
 * **Dictation reference = the video's own subtitles**: manual first, else automatic in the
   video's own language (never a machine translation); neither → refused (2026-09-20), never
   Deepgram. Audio stored as served (no FFmpeg); sentences shown as the captions spell them.
@@ -158,6 +165,11 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
   retired (`learner_model.is_retired`): kept, never queued. Rule (`pattern`) items are retired
   too — the rule and its examples show on the mistake card after the answer — and so are
   phrases that are grammar notes with no gap (a formula, or a takeaway only).
+* **Suggested words don't repeat word cards, checked in code for free** (2026-09-27):
+  Claude gets only a short hint list (`known_words` by topic/context, `cards_in_text`) and
+  writes a couple extra; `fresh_vocabulary` drops exact repeats (`learner_model.similar_card`),
+  overlaps are shown with a hint. Deleting a word card (`DELETE /api/learner/words/<id>`)
+  appends «remove» picks; its attempts stay.
 * **Every generation takes a context «уклон»** (a `theme`, 2026-09-26): AI sets, analysis
   drills, own-theme speaking prompts; default = the last one used (IT / бэкенд first).
   Theory never follows it. `context` in attempts means the screen, not the theme.

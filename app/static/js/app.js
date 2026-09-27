@@ -1,5 +1,6 @@
 // Tiny hash router: #/today (home), #/practice[/<topic>] («Занятия»),
-// #/record[/<prompt>], #/picture, #/talk[/<prompt>], #/shadowing[/<session>:<n>],
+// #/speaking[/<prompt>] («Говорение»; #/record and #/talk are its older links),
+// #/picture, #/shadowing[/<session>:<n>],
 // #/dictation[/<videoId>], #/translate[/<textId>], #/roadmap, #/speak/<lesson>:<task>, #/moduletest/<module>,
 // #/history, #/session/<id>, #/progress. No build step,
 // no framework - just enough to switch between the view modules loaded above.
@@ -9,6 +10,7 @@
   const TAB_FOR_ROUTE = {
     today: "today",
     practice: "practice",
+    speaking: "practice",
     record: "practice",
     picture: "practice",
     talk: "practice",

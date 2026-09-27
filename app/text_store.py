@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -121,18 +122,38 @@ def vocabulary(document: Dict[str, Any]) -> List[Dict[str, str]]:
     ]
 
 
-def avoid_titles(theme: Optional[Dict[str, Optional[str]]]) -> List[str]:
-    """Titles of earlier generated texts in the same context, newest first."""
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s")
+
+
+def recent_texts(theme: Optional[Dict[str, Optional[str]]]) -> List[Dict[str, Any]]:
+    """The latest generated texts in the same context, newest first, as a new
+    text needs them to be different: {"gist", "genre", "opening"}.
+
+    Titles alone did not keep plots apart (2026-09-27: «Долгий баг» and
+    «Ночной инцидент» were one story), so each text keeps a one-line gist.
+    Texts written before that get the title and first sentence instead."""
     key = (theme or {}).get("key")
     label = (theme or {}).get("label")
-    titles = []
+    recent = []
     for document in list_texts():
         other = document.get("theme") or {}
         if document.get("origin") != ORIGIN_GENERATED:
             continue
-        if (key and other.get("key") == key) or (not key and other.get("label") == label):
-            titles.append(document.get("title", ""))
-    return [t for t in titles if t][: config.TEXT_AVOID_TITLES]
+        if not ((key and other.get("key") == key) or (not key and other.get("label") == label)):
+            continue
+        text = (document.get("text") or "").strip()
+        gist = (document.get("gist") or "").strip()
+        if not gist:
+            first = _SENTENCE_END.split(text, maxsplit=1)[0][:200]
+            gist = f"{document.get('title', '')}: {first}".strip(": ")
+        recent.append(
+            {
+                "gist": gist,
+                "genre": document.get("genre"),
+                "opening": " ".join(text.split()[:4]),
+            }
+        )
+    return recent[: config.TEXT_RECENT]
 
 
 def text_summary(document: Dict[str, Any]) -> Dict[str, Any]:
@@ -147,6 +168,7 @@ def text_summary(document: Dict[str, Any]) -> Dict[str, Any]:
         "theme": document.get("theme"),
         "size": document.get("size"),
         "level": document.get("level"),
+        "genre": document.get("genre"),
         "words": document.get("words"),
         "minutes": document.get("minutes"),
         "attempts": len(attempts),

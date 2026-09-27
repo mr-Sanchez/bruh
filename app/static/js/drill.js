@@ -119,6 +119,35 @@ const Drill = (() => {
       .join("")}</div>`;
   }
 
+  // A delete button that asks once more in place (no browser dialog): the
+  // first click turns it into «Точно удалить?», the second runs `onDelete`;
+  // it goes back to normal after a few seconds.
+  function armDelete(button, onDelete) {
+    const label = button.textContent;
+    let timer = null;
+    button.addEventListener("click", async () => {
+      if (!button.classList.contains("armed")) {
+        button.classList.add("armed");
+        button.textContent = "Точно удалить?";
+        timer = setTimeout(() => {
+          button.classList.remove("armed");
+          button.textContent = label;
+        }, 4000);
+        return;
+      }
+      clearTimeout(timer);
+      button.disabled = true;
+      button.textContent = "Удаляем…";
+      try {
+        await onDelete();
+      } catch (err) {
+        button.disabled = false;
+        button.classList.remove("armed");
+        button.textContent = `Не удалось: ${err.message}`;
+      }
+    });
+  }
+
   // ------------------------------------------------------------- cards
   const KIND_LABELS = { fix: "Ошибка", phrase: "Фраза", word: "Слово" };
   // Longest spoken answer on a card (the server's CARD_DICTATION_MAX_SECONDS).
@@ -306,12 +335,13 @@ const Drill = (() => {
       </div>`;
   }
 
-  // A word card's back: the English, an example in the set's context with
-  // its translation, a short remark, and the free references.
+  // A word card's back: the English with its IPA, an example in the set's
+  // context with its translation, a short remark, and the free references.
   function wordBack(item) {
     const c = item.content || {};
     return `
       <p class="word-back">${escapeHtml(c.english)}</p>
+      ${c.transcription ? `<p class="transcription">${escapeHtml(c.transcription)}</p>` : ""}
       ${
         c.example
           ? `<p class="phrase-example">${escapeHtml(c.example)}</p>
@@ -337,6 +367,7 @@ const Drill = (() => {
   function runCards(container, cards, { title, context, onFinish }) {
     let index = 0;
     let right = 0;
+    let deleted = 0;
 
     function show() {
       if (index >= cards.length) return finish();
@@ -348,6 +379,11 @@ const Drill = (() => {
             <h2>${escapeHtml(title)}</h2>
             <span class="muted">${index + 1} / ${cards.length}</span>
           </div>
+          ${
+            item.kind === "word"
+              ? `<div class="card-tools"><button type="button" class="link-button" data-role="delete-card">Удалить карточку</button></div>`
+              : ""
+          }
           <div class="progress-bar"><div style="width:${(index / cards.length) * 100}%"></div></div>
           <p class="muted drill-meta">${KIND_LABELS[item.kind] || ""}${item.state.is_new ? " · новая" : ` · коробка ${item.state.box}`}${topicPart}</p>
           ${cardPrompt(item)}
@@ -359,6 +395,17 @@ const Drill = (() => {
         topicLabel(item.topic).then((label) => {
           const slot = container.querySelector('[data-role="topic"]');
           if (slot) slot.textContent = label;
+        });
+      }
+      const deleteButton = container.querySelector('[data-role="delete-card"]');
+      if (deleteButton) {
+        // A duplicate or a word not worth learning: gone from every deck, no
+        // attempt logged, on to the next card.
+        armDelete(deleteButton, async () => {
+          await Api.deleteWordCard(item.id);
+          deleted += 1;
+          index += 1;
+          show();
         });
       }
       if (item.exercise.type === "translate") askTranslate(item);
@@ -501,7 +548,8 @@ const Drill = (() => {
       container.innerHTML = `
         <div class="card drill-card">
           <h2>${escapeHtml(title)} — готово</h2>
-          <p class="drill-score">${right} из ${cards.length} верно</p>
+          <p class="drill-score">${right} из ${cards.length - deleted} верно</p>
+          ${deleted ? `<p class="muted">Удалено карточек: ${deleted}.</p>` : ""}
           <p class="muted">Карточки с ошибками вернутся завтра, верные — позже, по графику повторений.</p>
           <div class="button-row"><button data-role="done">Готово</button></div>
         </div>`;
@@ -793,6 +841,17 @@ const Drill = (() => {
     show();
   }
 
+  // Which of the learner's cards a word repeats or overlaps (the server's
+  // learner_model.similar_card), shown so a near-duplicate is a conscious pick.
+  function similarHint(similar) {
+    if (!similar) return "";
+    return `<span class="vocab-similar">${
+      similar.exact
+        ? "Уже есть в ваших карточках"
+        : `Похоже на вашу карточку: <b>${escapeHtml(similar.english)}</b>`
+    }</span>`;
+  }
+
   // Useful words and phrases the learner ticks to become Russian -> English
   // word cards (an AI set's vocabulary, a translated text's phrases). Saving
   // sends the whole choice through `save(ids)`, so an unticked entry that was
@@ -816,9 +875,11 @@ const Drill = (() => {
               <input type="checkbox" value="${escapeHtml(v.id)}"${saved.has(v.id) ? " checked" : ""} />
               <span>
                 <span class="phrase">${escapeHtml(v.english)}</span>
+                ${v.transcription ? `<span class="transcription">${escapeHtml(v.transcription)}</span>` : ""}
                 <span class="muted">— ${escapeHtml(v.russian)}</span>
                 ${v.example ? `<span class="phrase-example">${escapeHtml(v.example)}</span>` : ""}
                 ${v.note ? `<span class="word-note">${escapeHtml(v.note)}</span>` : ""}
+                ${similarHint(v.similar)}
               </span>
             </label>
           </li>`
@@ -858,5 +919,8 @@ const Drill = (() => {
     refresh();
   }
 
-  return { runCards, runSet, showSetRuns, normalize, matches, wordDiff, wireDictation, vocabularyPicker };
+  return {
+    runCards, runSet, showSetRuns, normalize, matches, wordDiff, wireDictation, vocabularyPicker,
+    similarHint, armDelete,
+  };
 })();

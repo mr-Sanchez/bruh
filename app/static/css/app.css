@@ -380,6 +380,8 @@ button.success { background: var(--success); }
 .dictate-button.recording { border-color: var(--accent); color: var(--accent); }
 .word-front { font-family: var(--font-display); font-size: 1.35rem; margin: 10px 0 14px; }
 .word-back { font-family: var(--font-display); font-size: 1.2rem; color: var(--gold); margin: 4px 0 8px; }
+.transcription { color: var(--text-muted); font-size: 0.95rem; margin: -4px 0 8px; }
+.vocab-row .transcription { margin: 0 0 0 4px; }
 .word-note { display: block; font-size: 0.92rem; color: var(--plum-muted); margin-top: 4px; }
 .vocab-block { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
 .vocab-list { list-style: none; margin: 8px 0; padding: 0; }
@@ -392,6 +394,15 @@ button.success { background: var(--success); }
 .vocab-row .word-note { color: var(--text-muted); }
 .vocab-row input { accent-color: var(--accent); margin-top: 4px; flex: none; }
 .vocab-row .phrase-example { display: block; }
+.vocab-similar { display: block; font-size: 0.9rem; color: var(--gold); margin-top: 4px; }
+.card-tools { display: flex; justify-content: flex-end; margin: -6px 0 0; }
+.link-button.armed { color: var(--danger); }
+.words-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 10px 0 4px; }
+.words-filter input[type="search"] { flex: 1 1 220px; }
+.words-only-similar { display: flex; align-items: center; gap: 6px; font-size: 0.95rem; text-transform: none; letter-spacing: normal; }
+.word-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.word-row .phrase { font-weight: 600; }
+.word-row .transcription { margin: 0 0 0 4px; }
 .card-hint { margin: 0 0 10px; color: var(--text-muted); font-size: 0.95rem; }
 .card-hint summary { cursor: pointer; width: fit-content; }
 .card-source {
@@ -510,6 +521,13 @@ button.success { background: var(--success); }
 .speaking-prompt .muted { color: var(--plum-muted); }
 .speaking-prompt .speaking-question { font-family: var(--font-display); font-weight: 500; font-size: 1.2rem; line-height: 1.35; }
 .speaking-prompt button.secondary { border-color: var(--plum-border); color: var(--plum-text); }
+/* «Говорение»: topic / time / takes switches; the latest take stands out. */
+.speaking-switches { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 14px; }
+.speaking-switch .field-label { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px; }
+.speaking-switch .segmented { flex-wrap: wrap; max-width: 100%; }
+.speaking-switch .segmented label { padding: 0 14px; }
+.speaking-switch label:has(input:disabled) { opacity: 0.6; cursor: default; }
+.take-card.is-latest { border-color: var(--accent); }
 .rec-dot { display: inline-block; width: 10px; height: 10px; border-radius: 5px; background: currentColor; margin-right: 8px; vertical-align: 1px; }
 
 /* Aside: streak, focus topic, score trend. */

@@ -6,7 +6,7 @@
 //     A select: built-in contexts, the learner's own, «Свой вариант…» (a
 //     one-off typed line; `oneOff: false` hides it) and «Добавить свой…».
 //     value() is what a request sends: {key} or {label}.
-//   ThemePicker.mountPrompts(host, { promptId, onPrompt }) -> { current(), lock() }
+//   ThemePicker.mountPrompts(host, { promptId, onPrompt }) -> { current(), lock(), unlock() }
 //     The picker plus a speaking prompt of the chosen context, «Другая тема»,
 //     and «Придумать темы» (Haiku) for an own context without prompts yet.
 const ThemePicker = (() => {
@@ -270,6 +270,12 @@ const ThemePicker = (() => {
       lock: () => {
         locked = true;
         picker.disable(true);
+        draw();
+      },
+      // A new series: the prompt can be changed again.
+      unlock: () => {
+        locked = false;
+        picker.disable(false);
         draw();
       },
     };

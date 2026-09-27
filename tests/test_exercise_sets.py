@@ -198,7 +198,8 @@ class VocabularyTests(unittest.TestCase):
         parsed = sample_set()
         parsed.vocabulary = [
             VocabularyItem(english="so far", russian="пока что", example="So far so good.",
-                           example_russian="Пока всё хорошо.", note=" Сигнал Present Perfect. "),
+                           example_russian="Пока всё хорошо.", note=" Сигнал Present Perfect. ",
+                           transcription=" /soʊ ˈfɑːr/ "),
             VocabularyItem(english="So far!", russian="до сих пор", example="", example_russian=""),
             VocabularyItem(english="have + V3", russian="формула", example="", example_russian=""),
             VocabularyItem(english="deadline", russian="", example="", example_russian=""),
@@ -209,6 +210,9 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual([(v["id"], v["english"]) for v in result.vocabulary],
                          [("v1", "so far"), ("v2", "roll back")])
         self.assertEqual(result.vocabulary[0]["note"], "Сигнал Present Perfect.")
+        self.assertEqual(result.vocabulary[0]["transcription"], "/soʊ ˈfɑːr/")
+        self.assertEqual(result.vocabulary[1]["transcription"], "")  # optional
         call = messages.calls[0]
         self.assertIn("reach out; a tight deadline", call["messages"][0]["content"])
-        self.assertIn(f"exactly {config.SET_VOCABULARY} useful English words", call["system"])
+        self.assertIn(f"exactly {config.SET_VOCABULARY_ASKED} useful English words", call["system"])
+        self.assertIn("`transcription`: the IPA transcription", call["system"])

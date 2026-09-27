@@ -14,6 +14,11 @@ Views.translate = (() => {
   const DRAFT_PREFIX = "translate-draft:";
   const DICTATION_SECONDS = 120;
   const LEVEL_LABELS = { a2: "A2", b1: "B1", b2: "B2", c1: "C1" };
+  // app/text_translation.py GENRES: picked by the server, shown as a label.
+  const GENRE_LABELS = {
+    email: "письмо", chat: "сообщение в чат", blog: "пост в блоге", explainer: "объяснение",
+    review: "отзыв", announcement: "объявление", advice: "советы", story: "история",
+  };
   const MISTAKE_KINDS = {
     grammar: "Грамматика",
     meaning: "Смысл",
@@ -142,6 +147,7 @@ Views.translate = (() => {
   function textRow(t) {
     const meta = [
       t.origin === "custom" ? "свой текст" : t.theme && t.theme.label ? t.theme.label : "ИИ ассистент",
+      GENRE_LABELS[t.genre] || "",
       t.level ? LEVEL_LABELS[t.level] : "",
       `${t.words} слов · ≈ ${t.minutes} мин`,
       (t.created_at || "").slice(0, 10),
@@ -240,6 +246,7 @@ Views.translate = (() => {
     const initial = readStore(draftKey, null) ?? (last ? last.text : "");
     const meta = [
       doc.origin === "custom" ? "Свой текст" : `ИИ ассистент · ${doc.theme && doc.theme.label ? doc.theme.label : ""}`,
+      GENRE_LABELS[doc.genre] || "",
       doc.level ? LEVEL_LABELS[doc.level] : "",
       `${doc.words} слов · перевод ≈ ${doc.minutes} мин`,
     ].filter(Boolean);

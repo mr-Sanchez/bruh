@@ -33,6 +33,23 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
 
 ## Done
 
+- **2026-09-27 — «Монолог» and «60 секунд» merged into «Говорение».** Asked for by the
+  user (the two barely differed). One activity (`#/speaking`, speech.js) with three switches,
+  remembered in the browser: topic «своя» / «предложенная» (the same prompt and «уклон»
+  picker), time «без лимита» / 1 / 2 / 3 min (the recorder stops itself), takes «один» /
+  «серия ×3». Every take is a `kind=monologue` session; its `drill` holds the prompt (None for
+  an own topic), `time_limit`, `series`, `round` and `silences`; later rounds copy the first
+  take's prompt and limit. Every take shows pace / fillers / pauses and has its own
+  «Анализировать» button — the latest (smoothest) one is highlighted (decided with the
+  user); the series' takes are compared in a table. **The first take of any English
+  monologue** (a lesson task too, not a picture) now logs the `filler_words_fluency`
+  attempt (`exercise=monologue`), not only a timed one (decided with the user); later
+  rounds are practice. `kind=talk` is no longer accepted; older talk takes stay readable
+  (session page, «Прогресс» series, not analysable). The «Сегодня» warm-up is done by a
+  second round of a series (or shadowing); `#/record` and `#/talk` still open the view
+  (`#/talk` presets 1 min ×3). A plain monologue's session page now shows its measurements.
+  `record.js` keeps only the picture description and the lesson task.
+
 - **2026-09-27 — «Спросить ИИ»: a chat about any selected text.** Asked for by the user (a
   review said «нужно прошедшее время» where the English has present simple, and there was no
   way to ask why). Selecting text anywhere in the app shows a «Спросить ИИ» bubble; the panel

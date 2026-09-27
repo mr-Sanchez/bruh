@@ -6,7 +6,13 @@ window.Views = window.Views || {};
 Views.history = (() => {
   const KIND_ICONS = { picture: "image", talk: "timer", shadowing: "speak", monologue: "mic" };
 
-  const DRILL_NAMES = { ai_set: "AI-набор", cloze: "пропуски", talk: "60 секунд", shadowing: "shadowing" };
+  const DRILL_NAMES = {
+    ai_set: "AI-набор",
+    cloze: "пропуски",
+    monologue: "говорение",
+    talk: "60 секунд",
+    shadowing: "shadowing",
+  };
 
   const STATUS_LABELS = {
     recording: "Запись",

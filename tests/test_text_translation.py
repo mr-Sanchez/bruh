@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import api, config, text_store  # noqa: E402
+from app import api, config, text_store, text_translation  # noqa: E402
 from app.analyzer import AnalysisError, MissingAnthropicApiKeyError  # noqa: E402
 from app.exercise_sets import ClaudeCall, VocabularyItem  # noqa: E402
 from app.server import app as fastapi_app  # noqa: E402
@@ -79,11 +79,13 @@ REVIEW = TextReview(
 class TextTranslatorTests(unittest.TestCase):
     def test_write_text_asks_sonnet_for_the_size_level_and_context(self) -> None:
         translator, messages = translator_with(
-            WrittenText(title=" Релиз в пятницу ", text=" We are rolling out... ")
+            WrittenText(title=" Релиз в пятницу ", text=" We are rolling out... ",
+                        gist=" a release on Friday ")
         )
         result = translator.write_text(
-            size="short", level="b2", theme={"key": None, "label": "gardening"},
-            avoid_titles=["Старый текст"],
+            size="short", level="b2", theme={"key": None, "label": "gardening"}, genre="email",
+            recent=[{"gist": "tomatoes died in the frost", "genre": "story",
+                     "opening": "Last night the frost"}],
         )
         call = messages.calls[0]
         self.assertEqual(call["model"], config.TEXT_WRITE_MODEL)
@@ -92,11 +94,21 @@ class TextTranslatorTests(unittest.TestCase):
         request = call["messages"][0]["content"]
         self.assertIn("gardening", request)
         self.assertIn("B2", request)
-        self.assertIn("- Старый текст", request)
+        self.assertIn(f"Genre: {text_translation.GENRES['email'][0]}", request)
+        self.assertIn('- tomatoes died in the frost; opened "Last night the frost..."', request)
         self.assertEqual((result.title, result.text), ("Релиз в пятницу", "We are rolling out..."))
+        self.assertEqual(result.gist, "a release on Friday")
+
+    def test_the_genre_is_a_new_one_else_the_longest_unused(self) -> None:
+        pick = text_translation.pick_genre
+        everything = list(text_translation.GENRES)
+        self.assertNotIn(pick(["story", None, "email"]), {"story", "email"})
+        # All used: the one whose last use is the oldest.
+        newest_first = ["chat"] + everything[::-1]
+        self.assertEqual(pick(newest_first), everything[0])
 
     def test_an_empty_text_is_an_error(self) -> None:
-        translator, _ = translator_with(WrittenText(title="x", text="  "))
+        translator, _ = translator_with(WrittenText(title="x", text="  ", gist=""))
         with self.assertRaises(AnalysisError):
             translator.write_text(size="medium", level="b1")
 
@@ -130,10 +142,12 @@ class FakeTextTranslator:
         self.reviews = 0
         self.fail: Optional[Exception] = None
         self.last_write: Dict[str, Any] = {}
+        self.known_phrases: List[List[str]] = []
 
     def write_text(self, **kwargs: Any) -> WriteResult:
         self.last_write = kwargs
         return WriteResult(
+            gist="rolling out an update on Friday",
             title="Релиз в пятницу",
             text="We are rolling out the update on Friday.\n\nPlease reach out if anything breaks.",
             call=ClaudeCall(model=config.TEXT_WRITE_MODEL, usage={"input_tokens": 500,
@@ -141,9 +155,10 @@ class FakeTextTranslator:
         )
 
     def review(self, text: str, translation: str, *, direction: str,
-               phrase_prefix: str) -> ReviewResult:
+               phrase_prefix: str, known_phrases=()) -> ReviewResult:
         if self.fail:
             raise self.fail
+        self.known_phrases.append(list(known_phrases))
         self.reviews += 1
         phrases = [
             {"id": f"{phrase_prefix}1", "english": "roll out", "russian": "выпустить",
@@ -194,10 +209,28 @@ class TranslateApiTests(unittest.TestCase):
         usage = self.client.get("/api/usage").json()["by_purpose"]
         self.assertEqual(usage["anthropic:translate_text"]["calls"], 1)
 
-    def test_a_second_text_in_the_context_avoids_the_first_title(self) -> None:
+    def test_a_second_text_in_the_context_avoids_the_first_plot_and_genre(self) -> None:
+        first = self._generate()
+        self.assertIn(first["genre"], text_translation.GENRES)
+        self.assertEqual(first["gist"], "rolling out an update on Friday")
+        self.assertEqual(self.translator.last_write["recent"], [])
         self._generate()
-        self._generate()
-        self.assertEqual(self.translator.last_write["avoid_titles"], ["Релиз в пятницу"])
+        (recent,) = self.translator.last_write["recent"]
+        self.assertEqual(recent, {"gist": "rolling out an update on Friday",
+                                  "genre": first["genre"], "opening": "We are rolling out"})
+        self.assertNotEqual(self.translator.last_write["genre"], first["genre"])
+        listed = {t["id"]: t for t in self.client.get("/api/translate/texts").json()["texts"]}
+        self.assertEqual(listed[first["id"]]["genre"], first["genre"])
+
+    def test_a_text_from_before_gists_offers_its_title_and_first_sentence(self) -> None:
+        text_store.save_text({
+            "id": "txt-20260101-000000", "origin": "generated", "title": "Долгий баг",
+            "theme": {"key": "it_backend"}, "attempts": [],
+            "text": "Yesterday our payment service went down. Nobody noticed.",
+        })
+        (recent,) = text_store.recent_texts({"key": "it_backend", "label": "IT"})
+        self.assertEqual(recent["gist"], "Долгий баг: Yesterday our payment service went down.")
+        self.assertIsNone(recent["genre"])
 
     def test_a_custom_text_is_stored_as_pasted_for_free(self) -> None:
         pasted = "  The quick brown fox jumps over the lazy dog, twice a day.  "
@@ -264,6 +297,18 @@ class TranslateApiTests(unittest.TestCase):
         self.assertEqual(saved["removed"], 1)
         bad = self.client.put(url, json={"picked": ["r9-9"]})
         self.assertEqual(bad.status_code, 400)
+
+        # The next review is told which cards are in the text ("rolling out"),
+        # and a suggestion that repeats a card is dropped, the rest renumbered.
+        third = self.client.post(review_url, json={"translation": "Третий."}).json()
+        self.assertEqual(self.translator.known_phrases[-1], ["roll out"])
+        phrases = third["attempts"][-1]["phrases"]
+        self.assertEqual([(p["id"], p["english"]) for p in phrases], [("r3-1", "reach out")])
+        # An earlier review's phrase that is not a card here but was picked
+        # elsewhere would say so; this one's own pick carries no hint.
+        first = third["attempts"][0]["phrases"]
+        self.assertNotIn("similar", first[0])
+        self.assertNotIn("similar", first[1])
 
     def test_ids_from_the_url_are_checked(self) -> None:
         self.assertEqual(self.client.get("/api/translate/texts/..%5Cx").status_code, 400)

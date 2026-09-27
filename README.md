@@ -90,8 +90,10 @@ It also shows the topic to focus on, the minutes left, a day streak and score ti
 
 ### Занятия: activities
 
-* **Монолог.** Record yourself on any prompt, then press **Анализировать** to get a
-  coach-style review in Russian. For each mistake you get the verbatim quote, an
+* **Говорение.** Speak on your own topic or a suggested prompt, with no time limit or
+  1–3 minutes, as one take or a series of three takes of the same thought. Every take
+  shows its pace, fillers per minute and long pauses (a series is compared in a table);
+  press **Анализировать** on any take to get a coach-style review in Russian. For each mistake you get the verbatim quote, an
   explanation, a minimal correction, more natural alternatives and the reusable
   construction behind the fix, all tagged with a topic. The review also includes the
   whole monologue retold the way it could have sounded (your transcript stays as it was),
@@ -100,11 +102,9 @@ It also shows the topic to focus on, the minutes left, a day streak and score ti
 * **Описание картинки.** Pick, drop or paste a picture, then describe it by voice or by
   typing. The review also lists what you did not mention and gives vocabulary for the
   scene.
-* **«60 секунд»** and **Shadowing.** Spoken drills measured only from Deepgram's word
-  timings, with no Claude call. «60 секунд» means three one-minute takes on the same
-  prompt, compared by pace, fillers per minute and long pauses. In Shadowing you read a
-  passage of your own improved text aloud and it is aligned word by word with what was
-  heard.
+* **Shadowing.** A spoken drill measured only from Deepgram's word timings, with no
+  Claude call: you read a passage of your own improved text aloud and it is aligned word
+  by word with what was heard.
 * **Диктант.** Paste a YouTube link, and the video becomes a lesson made of its audio and
   the sentences of **its own subtitles**. A video without usable subtitles is refused;
   nothing is sent to Deepgram. You type each sentence while it replays: Enter listens

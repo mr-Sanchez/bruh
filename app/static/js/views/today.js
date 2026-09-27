@@ -7,7 +7,7 @@
 //   4. optional: «Урок дня» of the course - the lesson the learner's mistakes
 //      ask for most (else «Продолжить»), with its next action (theory, a set,
 //      the spoken task); it replaced the AI-set step on 2026-09-26;
-//   5. optional, Deepgram only: a spoken warm-up («60 секунд» or shadowing).
+//   5. optional, Deepgram only: a spoken warm-up (a «Говорение» series or shadowing).
 // Each step's done/todo state comes from the attempts log and today's
 // recordings, so the screen stays right after a reload.
 window.Views = window.Views || {};
@@ -18,7 +18,7 @@ Views.today = (() => {
 
   const STEP_TITLES = {
     cards: "Карточки",
-    monologue: "Монолог",
+    monologue: "Говорение",
     dictation: "Диктант на слух",
     lesson: "Урок дня",
     speech: "Речевая разминка",
@@ -222,11 +222,12 @@ Views.today = (() => {
     return stepShell(step, body, action);
   }
 
-  // Deepgram only, so it is optional like «Урок дня»: «60 секунд» on the
-  // day's prompt, or shadowing the passage that needs it most.
+  // Deepgram only, so it is optional like «Урок дня»: a series of one-minute
+  // «Говорение» takes on the day's prompt, or shadowing the passage that needs
+  // it most.
   function renderSpeech(step) {
     if (step.status === "done") {
-      const what = step.activity === "shadowing" ? "Shadowing" : "«60 секунд»";
+      const what = step.activity === "shadowing" ? "Shadowing" : "Серия дублей";
       return stepShell(
         step,
         `<p class="muted">${what}: сделано. Разбор — на странице записи.</p>`,
@@ -235,7 +236,7 @@ Views.today = (() => {
     }
     const passage = step.passage;
     const body = `
-      <p class="muted">Минута на тему «${escapeHtml(step.prompt.hint)}» (${escapeHtml(step.prompt.theme.label)}) — три раза подряд;
+      <p class="muted">Минута на тему «${escapeHtml(step.prompt.hint)}» (${escapeHtml(step.prompt.theme.label)}) — три дубля подряд;
         считаем темп, паразиты и паузы.</p>
       ${
         passage

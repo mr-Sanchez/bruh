@@ -1,14 +1,16 @@
-// Spoken drills (Stage 6) - measured from Deepgram's word timings and the
-// silences in the audio (Recorder.findSilences), no Claude:
-//   #/talk[/<prompt>]            «60 секунд»: one prompt, three one-minute takes
-//                                in a row; pace, fillers and pauses per take
+// Spoken activities, measured from Deepgram's word timings and the silences
+// in the audio (Recorder.findSilences) - the measuring itself needs no Claude:
+//   #/speaking[/<prompt>]        «Говорение»: an own or a suggested topic, an
+//                                optional time limit, one take or a series;
+//                                pace, fillers and pauses per take, analysis on
+//                                a click (#/record and #/talk are older links)
 //   #/shadowing[/<session>:<n>]  read a passage of your own improved_version
 //                                aloud; missed / misheard / unclear words marked
 // Speech.* renders the measurements; the session page uses it too.
 window.Views = window.Views || {};
 
 const Speech = (() => {
-  const EXERCISE_NAMES = { talk: "60 секунд", shadowing: "Shadowing" };
+  const EXERCISE_NAMES = { monologue: "Говорение", talk: "60 секунд", shadowing: "Shadowing" };
 
   function tile(label, value, note) {
     return `
@@ -128,14 +130,16 @@ const Speech = (() => {
       ${session.kind === "shadowing" ? "" : renderTimeline(speech.timeline)}`;
   }
 
-  // Recording controls shared by both drills.
-  function controlsHtml(startLabel) {
+  // Recording controls shared by the spoken activities; `extraField` is
+  // one more field next to the microphone (the language of «Говорение»).
+  function controlsHtml(startLabel, extraField = "") {
     return `
       <div class="row">
         <div>
           <label for="mic-select">Микрофон</label>
           <select id="mic-select"></select>
         </div>
+        ${extraField}
       </div>
       <div class="status-line">
         <span id="status-badge" class="status-badge status-ready">Готово</span>
@@ -152,6 +156,8 @@ const Speech = (() => {
   // Wires the controls in `root` to a Recorder: records, finds the silences,
   // uploads with `upload(blob, seconds, silences)`, polls the session and
   // hands it to `onDone`. `silences` is a JSON string, or null if unmeasured.
+  // `maxSeconds` may be a function, read at every start (0 = no limit); with
+  // a limit and `countdown` the timer counts down.
   function wireRecorder(root, { maxSeconds, countdown, upload, onDone, onStart }) {
     const badge = root.querySelector("#status-badge");
     const timer = root.querySelector("#timer");
@@ -167,30 +173,38 @@ const Speech = (() => {
       badge.className = `status-badge status-${cls}`;
     };
     Recorder.fillMics(micSelect);
+    let recorder = null;
 
-    const recorder = Recorder.create({
-      maxSeconds,
-      onTick: (elapsed, level) => {
-        timer.textContent = formatDuration(countdown ? Math.max(0, maxSeconds - elapsed) + 0.999 : elapsed);
-        bar.style.width = `${Math.min(100, level * 160)}%`;
-      },
-      onStop: async ({ blob, durationSeconds }) => {
-        stopBtn.disabled = true;
-        micSelect.disabled = false;
-        bar.style.width = "0%";
-        status("Распознаётся...", "transcribing");
-        try {
-          const spans = await Recorder.findSilences(blob);
-          const result = await upload(blob, durationSeconds, spans && JSON.stringify(spans));
-          if (result.status === "error") throw new Error(result.detail || "Не удалось обработать запись.");
-          poll(result.session_id);
-        } catch (err) {
-          status("Ошибка", "error");
-          message.textContent = err.message;
-          startBtn.disabled = false;
-        }
-      },
-    });
+    const createRecorder = () => {
+      const limit = (typeof maxSeconds === "function" ? maxSeconds() : maxSeconds) || 0;
+      const down = countdown && limit > 0;
+      timer.textContent = formatDuration(down ? limit : 0);
+      return Recorder.create({
+        maxSeconds: limit || undefined,
+        onTick: (elapsed, level) => {
+          timer.textContent = formatDuration(down ? Math.max(0, limit - elapsed) + 0.999 : elapsed);
+          bar.style.width = `${Math.min(100, level * 160)}%`;
+        },
+        onStop,
+      });
+    };
+
+    async function onStop({ blob, durationSeconds }) {
+      stopBtn.disabled = true;
+      micSelect.disabled = false;
+      bar.style.width = "0%";
+      status("Распознаётся...", "transcribing");
+      try {
+        const spans = await Recorder.findSilences(blob);
+        const result = await upload(blob, durationSeconds, spans && JSON.stringify(spans));
+        if (result.status === "error") throw new Error(result.detail || "Не удалось обработать запись.");
+        poll(result.session_id);
+      } catch (err) {
+        status("Ошибка", "error");
+        message.textContent = err.message;
+        startBtn.disabled = false;
+      }
+    }
 
     function poll(id) {
       pollTimer = setTimeout(async () => {
@@ -217,6 +231,8 @@ const Speech = (() => {
 
     startBtn.addEventListener("click", async () => {
       message.textContent = "";
+      if (recorder) recorder.dispose();
+      recorder = createRecorder();
       try {
         await recorder.start(micSelect.value);
       } catch (err) {
@@ -230,7 +246,7 @@ const Speech = (() => {
       stopBtn.disabled = false;
       micSelect.disabled = true;
     });
-    stopBtn.addEventListener("click", () => recorder.stop());
+    stopBtn.addEventListener("click", () => recorder && recorder.stop());
 
     return {
       setStartLabel: (text) => (startBtn.textContent = text),
@@ -238,7 +254,7 @@ const Speech = (() => {
       dispose: () => {
         alive = false;
         clearTimeout(pollTimer);
-        recorder.dispose();
+        if (recorder) recorder.dispose();
       },
     };
   }
@@ -246,96 +262,299 @@ const Speech = (() => {
   return { renderMetrics, renderTimeline, renderReading, renderReport, controlsHtml, wireRecorder, EXERCISE_NAMES };
 })();
 
-// «60 секунд»: the same prompt three times, a minute each, compared side by side.
-Views.talk = (() => {
+// «Говорение» (2026-09-27: «Монолог» and «60 секунд» merged into one
+// activity) - three switches: an own or a suggested topic, a time limit (none
+// or 1-3 minutes) and one take or a series of the same thought said again.
+// Every take shows its pace, fillers and pauses (no Claude); any take can be
+// analysed on a click, the latest one - the smoothest - is the one suggested.
+Views.speaking = (() => {
+  const SETTINGS_KEY = "speaking.settings";
+  const DEFAULTS = { topic: "prompt", limit: 0, series: false };
   let controls = null;
 
-  async function render(container, param) {
-    let cfg;
-    let talks;
+  // The switches are a per-viewer convenience: remembered in the browser,
+  // with the defaults when storage is unavailable.
+  function loadSettings() {
     try {
-      [cfg, talks] = await Promise.all([Api.getConfig(), Api.getTalks()]);
+      return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
+    } catch (err) {
+      return { ...DEFAULTS };
+    }
+  }
+
+  function saveSettings(settings) {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch (err) {
+      // not remembered this time
+    }
+  }
+
+  function segmented(name, label, options, value) {
+    return `
+      <div class="speaking-switch">
+        <div class="field-label">${escapeHtml(label)}</div>
+        <div class="segmented" role="radiogroup" aria-label="${escapeHtml(label)}">
+          ${options
+            .map(
+              ([v, text]) => `<label><input type="radio" name="${name}" value="${v}"
+                ${String(v) === String(value) ? "checked" : ""} /> ${escapeHtml(text)}</label>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+  }
+
+  // `preset` (older links) overrides the remembered switches for this visit;
+  // a prompt id in `param` always means a suggested topic.
+  async function render(container, param, preset) {
+    let cfg;
+    try {
+      cfg = await Api.getConfig();
     } catch (err) {
       container.innerHTML = `<div class="card"><p class="muted">Не удалось загрузить: ${escapeHtml(err.message)}</p></div>`;
       return;
     }
-    // #/talk/<prompt id> from «Сегодня»; a plain #/talk opens the day's prompt.
-    const promptId = param ? decodeURIComponent(param) : talks.prompt.id;
-    const rounds = cfg.talk_rounds;
-    const takes = [];
+    const promptId = param ? decodeURIComponent(param) : null;
+    const settings = { ...loadSettings(), ...(preset || {}) };
+    if (promptId) settings.topic = "prompt";
+    if (!cfg.speaking_time_limits.includes(Number(settings.limit))) settings.limit = 0;
+    const rounds = cfg.speaking_rounds;
+    const limits = [[0, "Без лимита"], ...cfg.speaking_time_limits.map((s) => [s, `${s / 60} мин`])];
+
+    // The takes of this visit: in series mode the rounds of one series, else
+    // the latest single take. Each keeps its analysis once it has one.
+    let takes = [];
     let series = null;
+    let prompts = null;
+    let analysisPicker = null;
+
+    const warnings = [];
+    if (!cfg.deepgram_configured) warnings.push("DEEPGRAM_API_KEY не настроен — запись не распознается.");
+    if (!cfg.anthropic_configured) warnings.push("ANTHROPIC_API_KEY не настроен — разбор ИИ ассистента недоступен, замеры работают.");
+    const langField = `
+      <div>
+        <label for="lang-select">Язык практики</label>
+        <select id="lang-select">${cfg.language_profiles
+          .map((p) => `<option value="${escapeHtml(p.key)}">${escapeHtml(p.label)}</option>`)
+          .join("")}</select>
+      </div>`;
 
     container.innerHTML = `
       <p><a href="${param ? "#/today" : "#/practice"}">← ${param ? "Сегодня" : "Занятия"}</a></p>
       <div class="card">
-        <h2>60 секунд</h2>
+        <h2>Говорение</h2>
+        <div class="speaking-switches">
+          ${segmented("topic", "Тема", [["own", "Своя"], ["prompt", "Предложенная"]], settings.topic)}
+          ${segmented("limit", "Время", limits, settings.limit)}
+          ${segmented("takes", "Дубли", [["one", "Один"], ["series", `Серия ×${rounds}`]], settings.series ? "series" : "one")}
+        </div>
         <div id="prompt-slot"></div>
-        <p class="muted">Говорите ровно минуту — запись остановится сама. Потом ещё
-          ${rounds - 1} раза на ту же тему: с каждым разом должно получаться глаже. Считаем темп,
-          слова-паразиты (Deepgram) и паузы (по самой записи) — без ИИ ассистента.
-          Первая попытка идёт в тему «Слова-паразиты и беглость».</p>
-        ${cfg.deepgram_configured ? "" : `<p class="muted">DEEPGRAM_API_KEY не настроен — запись не распознается.</p>`}
-        ${Speech.controlsHtml(`Попытка 1 из ${rounds}`)}
+        <p class="muted" id="own-hint">Своя тема: говорите о чём угодно — о дне, работе, планах.</p>
+        <p class="muted" id="mode-hint"></p>
+        ${warnings.length ? `<p class="muted">${escapeHtml(warnings.join(" "))}</p>` : ""}
+        ${Speech.controlsHtml("Начать запись", langField)}
+        <p id="new-series-row" hidden>
+          <button type="button" class="link-button" id="new-series-btn">Новая серия</button>
+        </p>
       </div>
+      <div id="takes-head"></div>
       <div id="takes"></div>`;
 
-    const slot = container.querySelector("#prompt-slot");
-    let prompts = null;
-    try {
-      prompts = await ThemePicker.mountPrompts(slot, { promptId });
-    } catch (err) {
-      slot.innerHTML = `<p class="muted">Темы не загрузились: ${escapeHtml(err.message)}</p>`;
+    const langSelect = container.querySelector("#lang-select");
+    langSelect.value = cfg.default_language;
+    const promptSlot = container.querySelector("#prompt-slot");
+    const ownHint = container.querySelector("#own-hint");
+    const modeHint = container.querySelector("#mode-hint");
+    const takesHost = container.querySelector("#takes");
+    const newSeriesRow = container.querySelector("#new-series-row");
+    const switches = [...container.querySelectorAll(".speaking-switches input")];
+
+    const read = () => ({
+      topic: container.querySelector('input[name="topic"]:checked').value,
+      limit: Number(container.querySelector('input[name="limit"]:checked').value),
+      series: container.querySelector('input[name="takes"]:checked').value === "series",
+    });
+
+    async function syncTopic() {
+      const suggested = read().topic === "prompt";
+      promptSlot.hidden = !suggested;
+      ownHint.hidden = suggested;
+      if (suggested && !prompts) {
+        try {
+          prompts = await ThemePicker.mountPrompts(promptSlot, { promptId });
+        } catch (err) {
+          promptSlot.innerHTML = `<p class="muted">Темы не загрузились: ${escapeHtml(err.message)}</p>`;
+        }
+      }
     }
 
-    const takesHost = container.querySelector("#takes");
+    function syncHint() {
+      const s = read();
+      const time = s.limit ? `Запись остановится сама через ${s.limit / 60} мин.` : "Говорите 1–3 минуты и остановите запись сами.";
+      const takesText = s.series
+        ? `Потом ещё ${rounds - 1} раза о том же: с каждым дублем должно получаться глаже.`
+        : "";
+      modeHint.textContent = `${time} ${takesText} Считаем темп, слова-паразиты и паузы; первый дубль
+        английской записи идёт в тему «Слова-паразиты и беглость». Разбор ошибок — по кнопке.`;
+      container.querySelector("#timer").textContent = formatDuration(s.limit);
+    }
+
+    function startLabel() {
+      if (!read().series) return "Начать запись";
+      if (takes.length >= rounds) return "Ещё дубль";
+      return `Дубль ${takes.length + 1} из ${rounds}`;
+    }
+
+    // Once a series has started its switches, language and prompt are fixed
+    // until «Новая серия».
+    function lock(locked) {
+      switches.forEach((input) => (input.disabled = locked));
+      langSelect.disabled = locked;
+      newSeriesRow.hidden = !locked;
+      if (prompts) (locked ? prompts.lock : prompts.unlock)();
+    }
+
+    switches.forEach((input) =>
+      input.addEventListener("change", () => {
+        // Single takes and a series do not mix on screen.
+        if (input.name === "takes") {
+          takes = [];
+          drawTakes();
+        }
+        syncTopic();
+        syncHint();
+        controls.setStartLabel(startLabel());
+      })
+    );
+    container.querySelector("#new-series-btn").addEventListener("click", () => {
+      series = null;
+      takes = [];
+      lock(false);
+      drawTakes();
+      controls.setStartLabel(startLabel());
+    });
+
     controls = Speech.wireRecorder(container, {
-      maxSeconds: cfg.talk_seconds,
+      maxSeconds: () => read().limit,
       countdown: true,
-      // The series keeps its prompt: no switching once the first take starts.
       onStart: () => {
-        if (prompts) prompts.lock();
+        const s = read();
+        saveSettings(s);
+        if (s.series) {
+          lock(true);
+        } else {
+          // A single take: fixed only while it is being recorded.
+          switches.forEach((input) => (input.disabled = true));
+          langSelect.disabled = true;
+        }
       },
       upload: async (blob, seconds, silences) => {
-        const prompt = prompts && prompts.current();
-        if (!prompt && !series) throw new Error("Сначала выберите тему для рассказа.");
+        const s = read();
+        if (!s.series) {
+          switches.forEach((input) => (input.disabled = false));
+          langSelect.disabled = false;
+        }
+        const prompt = s.topic === "prompt" && prompts ? prompts.current() : null;
+        if (s.topic === "prompt" && !prompt && !series) throw new Error("Сначала выберите тему для рассказа.");
         const result = await Api.uploadSession(blob, {
-          language: "en-US",
+          language: langSelect.value,
           durationSeconds: seconds,
           mimeType: blob.type,
-          kind: "talk",
-          drill: { prompt_id: prompt ? prompt.id : null, series, silences },
+          kind: "monologue",
+          drill: {
+            prompt_id: series ? null : prompt && prompt.id,
+            time_limit: series || !s.limit ? null : s.limit,
+            series,
+            silences,
+          },
         });
-        if (!series) series = result.session_id;
+        if (s.series && !series) series = result.session_id;
         return result;
       },
       onDone: (session) => {
-        takes.push(session);
-        takesHost.innerHTML = renderTakes(takes, rounds);
-        if (takes.length >= rounds) {
-          controls.setStartLabel("Ещё попытка");
-        } else {
-          controls.setStartLabel(`Попытка ${takes.length + 1} из ${rounds}`);
-        }
+        if (read().series) takes.push(session);
+        else takes = [session];
+        drawTakes();
+        controls.setStartLabel(startLabel());
       },
     });
+
+    // The analysis «уклон» is one picker for all the takes on screen.
+    async function drawTakes() {
+      const head = container.querySelector("#takes-head");
+      if (!takes.length) {
+        head.innerHTML = "";
+        takesHost.innerHTML = "";
+        return;
+      }
+      if (!analysisPicker || analysisPicker.language !== takes[0].language) {
+        head.innerHTML = `<div class="card"><h2>Разбор ИИ ассистента</h2>
+          <p class="muted">Каждый дубль можно разобрать отдельно; лучше всего — последний, он самый гладкий.
+            Ошибки попадут в карточки.</p><div id="analyze-theme"></div></div>`;
+        analysisPicker = {
+          language: takes[0].language,
+          picker: await ThemePicker.mountForAnalysis(head.querySelector("#analyze-theme"), takes[0].language),
+        };
+      }
+      const seriesMode = read().series;
+      const newest = [...takes].reverse();
+      takesHost.innerHTML = `
+        ${takes.length > 1 ? renderComparison(takes) : ""}
+        ${newest.map((take, i) => renderTake(take, takes.length - i, i === 0, seriesMode)).join("")}`;
+      for (const take of takes) {
+        const slot = takesHost.querySelector(`[data-analysis="${take.id}"]`);
+        if (take.analysis) await renderAnalysis(slot, take.analysis);
+      }
+      takesHost.querySelectorAll("[data-analyze]").forEach((button) =>
+        button.addEventListener("click", () => analyze(button))
+      );
+    }
+
+    async function analyze(button) {
+      const take = takes.find((t) => t.id === button.dataset.analyze);
+      const slot = takesHost.querySelector(`[data-analysis="${take.id}"]`);
+      button.disabled = true;
+      button.textContent = "Анализируем...";
+      try {
+        const theme = analysisPicker && analysisPicker.picker ? analysisPicker.picker.value() : null;
+        const result = await Api.analyzeSession(take.id, !!take.analysis, theme);
+        take.analysis = result.analysis;
+        await renderAnalysis(slot, result.analysis);
+      } catch (err) {
+        slot.innerHTML = `<p class="muted">Ошибка анализа: ${escapeHtml(err.message)}</p>`;
+      } finally {
+        button.disabled = false;
+        button.textContent = analyzeLabel(take);
+      }
+    }
+
+    await syncTopic();
+    syncHint();
+    controls.setStartLabel(startLabel());
   }
 
-  function renderTakes(takes, rounds) {
-    const latest = takes[takes.length - 1];
-    const compare = takes.length > 1 ? renderComparison(takes) : "";
-    const done = takes.length >= rounds;
+  function analyzeLabel(take) {
+    return take.analysis ? "Анализировать повторно" : "Анализировать (ИИ ассистент)";
+  }
+
+  function renderTake(take, number, latest, seriesMode) {
+    const note = !seriesMode || !latest
+      ? ""
+      : number === 1
+        ? "Теперь ещё раз о том же: постарайтесь сказать то же самое, но ровнее и с меньшим числом «uh»."
+        : "Сравните дубли выше — меньше пауз и паразитов значит, мысль уже «уложилась».";
     return `
-      ${compare}
-      <div class="card">
-        <h2>Попытка ${takes.length}</h2>
-        ${Speech.renderMetrics(latest.speech && latest.speech.metrics)}
-        ${Speech.renderTimeline(latest.speech && latest.speech.timeline)}
-        <p class="muted">${
-          done
-            ? "Серия готова. Сравните попытки выше — меньше пауз и паразитов значит, мысль уже «уложилась»."
-            : "Теперь ещё раз о том же: постарайтесь сказать то же самое, но ровнее и с меньшим числом «uh»."
-        }</p>
-        <p><a href="#/session/${encodeURIComponent(latest.id)}">Запись и транскрипт →</a></p>
+      <div class="card take-card${latest ? " is-latest" : ""}">
+        <h2>${seriesMode ? `Дубль ${number}` : "Запись"}${latest && seriesMode && number > 1 ? ` <small class="muted">· последний</small>` : ""}</h2>
+        ${Speech.renderMetrics(take.speech && take.speech.metrics)}
+        ${Speech.renderTimeline(take.speech && take.speech.timeline)}
+        ${note ? `<p class="muted">${note}</p>` : ""}
+        <div class="button-row">
+          <button data-analyze="${escapeHtml(take.id)}"${latest ? "" : ` class="secondary"`}>${analyzeLabel(take)}</button>
+          <a href="#/session/${encodeURIComponent(take.id)}">Запись и транскрипт →</a>
+        </div>
+        <div data-analysis="${escapeHtml(take.id)}"></div>
       </div>`;
   }
 
@@ -350,7 +569,7 @@ Views.talk = (() => {
     const metrics = takes.map((t) => (t.speech && t.speech.metrics) || {});
     return `
       <div class="card">
-        <h2>Сравнение попыток</h2>
+        <h2>Сравнение дублей</h2>
         <div class="table-wrap">
           <table class="data-table">
             <thead><tr><th></th>${takes.map((_, i) => `<th>${i + 1}</th>`).join("")}</tr></thead>
@@ -373,6 +592,21 @@ Views.talk = (() => {
 
   return { render, dispose };
 })();
+
+// Older links: #/record[/<prompt>] was «Монолог» (one take, no limit),
+// #/talk[/<prompt>] was «60 секунд» (a series of one-minute takes). A plain
+// #/record keeps the remembered switches.
+Views.record = {
+  render: (container, param) =>
+    Views.speaking.render(container, param, param ? { limit: 0, series: false } : null),
+  dispose: () => Views.speaking.dispose(),
+};
+
+Views.talk = {
+  render: (container, param) =>
+    Views.speaking.render(container, param, { topic: "prompt", limit: 60, series: true }),
+  dispose: () => Views.speaking.dispose(),
+};
 
 // Shadowing: read a passage of your own improved_version aloud.
 Views.shadowing = (() => {
