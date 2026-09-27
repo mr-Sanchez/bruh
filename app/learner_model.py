@@ -18,6 +18,11 @@ text), not positional. That way re-analysing a session keeps attempts
 linked to the same items, and the same pattern or phrase coming up in two
 recordings merges into one item with two occurrences - which is exactly
 the "the mistake came back" signal the Leitner rules use.
+
+Word cards (2026-09-27) are the one kind the learner chooses: after a set run
+they pick words and phrases from the set's vocabulary, and each pick becomes
+a Russian -> English flashcard (items_from_word_picks). They have their own
+daily allowance of new cards and never depend on speech.
 """
 
 from __future__ import annotations
@@ -34,8 +39,11 @@ from app.utils import AnalysedSession
 KIND_FIX = "fix"  # one concrete mistake: quote -> correction
 KIND_PATTERN = "pattern"  # the reusable construction behind a fix
 KIND_PHRASE = "phrase"  # a word or construction to remember (vocabulary/takeaways)
+KIND_WORD = "word"  # a word or phrase the learner picked from a set: RU -> EN flashcard
 
-_ID_PREFIX: Dict[str, str] = {KIND_FIX: "fix", KIND_PATTERN: "pat", KIND_PHRASE: "phr"}
+_ID_PREFIX: Dict[str, str] = {
+    KIND_FIX: "fix", KIND_PATTERN: "pat", KIND_PHRASE: "phr", KIND_WORD: "wrd",
+}
 
 # Fixes on delivery topics (fillers, restarts) are not knowledge that can be
 # recalled on a card: "uh, I, I think" -> "I think". They still count towards
@@ -131,14 +139,18 @@ def items_from_analysis(session: AnalysedSession) -> List[Dict[str, Any]]:
 
 
 def build_bank(
-    sessions: Iterable[AnalysedSession], set_items: Iterable[Dict[str, Any]] = ()
+    sessions: Iterable[AnalysedSession],
+    set_items: Iterable[Dict[str, Any]] = (),
+    word_items: Iterable[Dict[str, Any]] = (),
 ) -> Dict[str, Dict[str, Any]]:
     """Merge every recording's items by id; the latest recording's wording wins.
 
     Sessions must come oldest first (utils.iter_analysed_sessions does that).
     `set_items` are mistakes made in AI exercise sets (items_from_set_run):
     they add cards and occurrences, but never reword an item that came from
-    speech - the learner's own sentence is the better card.
+    speech - the learner's own sentence is the better card. `word_items` are
+    the learner's word picks (items_from_word_picks); the first pick's wording
+    stays, so a card does not change under the learner's feet.
     """
     bank: Dict[str, Dict[str, Any]] = {}
     for session in sessions:
@@ -146,11 +158,50 @@ def build_bank(
             _merge_item(bank, item, reword=True)
     for item in sorted(set_items, key=lambda i: i["occurrences"][0]["at"]):
         _merge_item(bank, item, reword=False)
+    for item in sorted(word_items, key=lambda i: i["occurrences"][0]["at"]):
+        _merge_item(bank, item, reword=False)
     return bank
 
 
+def items_from_word_picks(picks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Word cards from the pick log (data/word_picks.jsonl), one per live pick.
+
+    A record is {"ts", "set_id", "vocab_id", "action": "add"|"remove", "word":
+    {"english", "russian", "example", "example_russian", "note"}, "lesson_id"}.
+    The newest record per (set, word) wins, so «убрать» after «добавить» takes
+    the card away. The same English picked from two sets is one card (the id is
+    a hash of the English) with two occurrences.
+    """
+    latest: Dict[tuple, Dict[str, Any]] = {}
+    for pick in sorted(_dicts(list(picks)), key=lambda p: str(p.get("ts", ""))):
+        latest[(pick.get("set_id"), pick.get("vocab_id"))] = pick
+    items: List[Dict[str, Any]] = []
+    for (set_id, vocab_id), pick in latest.items():
+        word = pick.get("word") if isinstance(pick.get("word"), dict) else {}
+        english = (word.get("english") or "").strip()
+        if pick.get("action") != "add" or not normalize_text(english):
+            continue
+        items.append(
+            {
+                "id": item_id(KIND_WORD, english),
+                "kind": KIND_WORD,
+                "language": "en",
+                "topic": None,
+                "lesson_id": pick.get("lesson_id"),
+                "content": {
+                    field: (word.get(field) or "").strip()
+                    for field in ("english", "russian", "example", "example_russian", "note")
+                },
+                "occurrences": [
+                    {"pick": f"{set_id}#{vocab_id}", "set_id": set_id, "at": pick["ts"]}
+                ],
+            }
+        )
+    return items
+
+
 def _occurrence_key(occurrence: Dict[str, Any]) -> Any:
-    return occurrence.get("session_id") or occurrence.get("set_run")
+    return occurrence.get("session_id") or occurrence.get("set_run") or occurrence.get("pick")
 
 
 def _merge_item(bank: Dict[str, Dict[str, Any]], item: Dict[str, Any], *, reword: bool) -> None:
@@ -209,6 +260,8 @@ def is_retired(item: Dict[str, Any]) -> bool:
     content = item.get("content") or {}
     if kind == KIND_PATTERN:
         return True
+    if kind == KIND_WORD:
+        return False
     if kind == KIND_PHRASE:
         phrase = content.get("phrase") or ""
         if phrase_gap(phrase, content.get("example") or "") is not None:
@@ -268,11 +321,17 @@ def item_state(
         LEITNER_CLOSE_AFTER_RECORDINGS analysed recordings in its language
         came and went without it reappearing.
 
+    A word card knows nothing of speech: a second pick of the same word does
+    not send it back, and it is closed by a correct review in box 5 (it was
+    remembered after the longest interval).
+
     `attempts` are this item's attempts (any order); `analysed_sessions` are
     {"recorded_at", "language"} for every analysed recording.
     """
     intervals = config.LEITNER_INTERVALS_DAYS
     max_box = len(intervals)
+    is_word = item.get("kind") == KIND_WORD
+    graduated = False
 
     events: List[tuple] = []
     for occurrence in item.get("occurrences", []):
@@ -293,8 +352,8 @@ def item_state(
     top_box_since: Optional[dt.datetime] = None
 
     for when, kind, was_correct in events:
-        if kind == 1:  # occurrence in speech
-            if practised:
+        if kind == 1:  # occurrence in speech (for a word: another pick)
+            if practised and not is_word:
                 box, due, reset_at, top_box_since = 1, when.date(), when, None
             continue
         practised = True
@@ -305,6 +364,7 @@ def item_state(
         if was_correct:
             correct += 1
             if due is None or day >= due:
+                graduated = graduated or (is_word and box == max_box)
                 box = min(max_box, box + 1)
                 due = day + dt.timedelta(days=intervals[box - 1])
         else:
@@ -315,8 +375,8 @@ def item_state(
         else:
             top_box_since = None
 
-    closed = False
-    if top_box_since is not None:
+    closed = graduated
+    if top_box_since is not None and not is_word:
         later = [
             s
             for s in analysed_sessions
@@ -488,6 +548,9 @@ def daily_queue(
     the topics that matter most right now (speech weakness x drill accuracy),
     major mistakes first, interleaved with phrases oldest first. New cards
     already started today count against the day's allowance.
+
+    Word cards the learner picked have an allowance of their own
+    (NEW_WORDS_PER_DAY), oldest pick first; they follow the other new cards.
     """
     live = {item_id_ for item_id_, item in bank.items() if not is_retired(item)}
     reviews = [
@@ -497,19 +560,25 @@ def daily_queue(
     ]
     reviews.sort(key=lambda i: (states[i].box, states[i].due or "", i))
 
-    started_today = sum(
-        1
-        for state in states.values()
+    def is_word(item_id_: str) -> bool:
+        return item_id_ in bank and bank[item_id_].get("kind") == KIND_WORD
+
+    started = [
+        item_id_
+        for item_id_, state in states.items()
         if state.first_attempt_at and _parse(state.first_attempt_at).date() == today
-    )
+    ]
+    started_today = sum(1 for i in started if not is_word(i))
+    words_started_today = len(started) - started_today
     limit = new_items_limit(len(reviews))
     remaining = max(0, limit - started_today)
 
-    fresh = [
+    all_fresh = [
         item_id_
         for item_id_, state in states.items()
         if item_id_ in live and state.is_new and state.is_due(today)
     ]
+    fresh = [i for i in all_fresh if not is_word(i)]
 
     def first_seen(item_id_: str) -> str:
         return min(o["at"] for o in bank[item_id_]["occurrences"])
@@ -533,12 +602,22 @@ def daily_queue(
         if phrase_cards and len(new) < remaining:
             new.append(phrase_cards.pop(0))
 
+    # Oldest pick first; picks saved together keep the set's order (v1, v2...).
+    fresh_words = sorted(
+        (i for i in all_fresh if is_word(i)),
+        key=lambda i: (first_seen(i), bank[i]["occurrences"][0].get("pick", ""), i),
+    )
+    words_remaining = max(0, config.NEW_WORDS_PER_DAY - words_started_today)
+    new_words = fresh_words[:words_remaining]
+
     return {
         "reviews": reviews,
-        "new": new,
+        "new": new + new_words,
         "new_limit": limit,
         "new_started_today": started_today,
-        "new_waiting": len(fresh) - len(new),
+        "new_words_limit": config.NEW_WORDS_PER_DAY,
+        "new_words_started_today": words_started_today,
+        "new_waiting": len(all_fresh) - len(new) - len(new_words),
     }
 
 
@@ -546,6 +625,7 @@ def daily_queue(
 EXERCISE_TRANSLATE = "translate"  # say a new Russian sentence in English; Claude checks
 EXERCISE_GAP = "gap"  # type the phrase into the gap in its own example
 EXERCISE_SELF = "self"  # recall, reveal, grade yourself
+EXERCISE_FLIP = "flip"  # word card: Russian front, recall, flip to the English, grade yourself
 
 _PARENTHESES = re.compile(r"\s*\([^)]*\)")
 
@@ -558,7 +638,8 @@ def card_exercise(item: Dict[str, Any], state: ItemState) -> Dict[str, Any]:
     a review is never the same sentence twice in a row. The answer is free
     text, so Claude checks it (POST /api/learner/cards/<id>/check). Anything
     code cannot check fairly - phrases that are really grammar notes
-    ("help + verb-ing") - is a self-graded flashcard.
+    ("help + verb-ing") - is a self-graded flashcard, and so is a word card
+    (decided 2026-09-27, Anki-style: synonyms make a typed check unfair).
     """
     content = item.get("content") or {}
     kind = item.get("kind")
@@ -578,6 +659,8 @@ def card_exercise(item: Dict[str, Any], state: ItemState) -> Dict[str, Any]:
         gap = phrase_gap(content.get("phrase") or "", content.get("example") or "")
         if gap is not None:
             return {"type": EXERCISE_GAP, **gap}
+    if kind == KIND_WORD:
+        return {"type": EXERCISE_FLIP}
     return {"type": EXERCISE_SELF}
 
 

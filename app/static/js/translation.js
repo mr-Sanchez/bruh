@@ -1,6 +1,6 @@
 // The translation task under a dictation lesson: the lesson is cut into parts
 // of 5-15 sentences (one Haiku call, on a click), and each part is translated
-// from memory of what was heard and reviewed by Haiku (one call per part, on a
+// from memory of what was heard and reviewed by Sonnet (one call per part, on a
 // click). Both results live on the server; this file only draws them.
 //   Translation.mount(card, lesson) -> { refresh() }
 // `lesson.translation` is the server's payload (see dictation_store.py).
@@ -61,7 +61,7 @@ window.Translation = (() => {
         <p class="muted">После диктанта можно перевести услышанное на русский по частям: урок
           длинный, поэтому сначала модель Haiku разобьёт текст на смысловые части по 5–15
           предложений (один запрос, около 0,5 ¢). Потом каждую часть вы переводите по памяти, и
-          Haiku разбирает перевод (тоже около 0,5 ¢ за часть). Ничего не запускается само.</p>
+          Sonnet разбирает перевод (около 2 ¢ за часть). Ничего не запускается само.</p>
         <button data-role="split" ${busy ? "disabled" : ""}>${
           busy ? "Разбиваем…" : "Разбить на части"
         }</button>`;
@@ -126,7 +126,7 @@ window.Translation = (() => {
           <button data-role="review" data-part="${part.index}" ${busy ? "disabled" : ""}>${
             busy ? "Проверяем…" : review ? "Проверить заново" : "Проверить перевод"
           }</button>
-          <span class="muted">Haiku, около 0,5 ¢. Один и тот же текст второй раз не оплачивается.</span>
+          <span class="muted">Sonnet, около 2 ¢. Один и тот же текст второй раз не оплачивается.</span>
         </div>
         ${review ? reviewBlock(review) : ""}`;
     }

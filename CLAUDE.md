@@ -32,7 +32,7 @@ app/utils.py            Session dataclass (owns every per-session file path), fs
 app/transcriber.py      Deepgram layer
 app/analyzer.py         Claude: monologue / picture analysis, topic tagging
 app/exercise_sets.py    Claude: AI exercise sets (generate + grade: Sonnet 5 low)
-app/dictation_translation.py  Claude (Haiku): cut a lesson into parts, review a translation
+app/dictation_translation.py  Claude: cut a lesson into parts (Haiku), review a translation (Sonnet)
 app/theory.py           Claude: a roadmap lesson's theory (Sonnet 5 low)
 app/speech_drills.py    pure: pace, fillers, pauses, shadowing alignment from word timings
 app/dictation.py        pure: WebVTT parsing, sentences, word checking, translation parts
@@ -65,6 +65,7 @@ data/progress.json, item_bank.json derived caches, rebuilt from analysis.json fi
 data/usage.jsonl                   append-only — tokens/minutes + cost per paid call
 data/card_verdicts.jsonl           append-only cache of Claude's card checks
 data/roadmap_marks.jsonl           AUTHORITATIVE, append-only — «уже знаю» / «пропустить»
+data/word_picks.jsonl              AUTHORITATIVE, append-only — words picked as word cards
 data/themes.json                   own contexts, last used, Claude-written prompts (paid)
 data/practice/<set-id>.json        AI sets + runs + verdicts; paid, NOT rebuildable
 data/theory/<lesson>.json          every version of a lesson's theory; paid, NOT rebuildable
@@ -119,8 +120,8 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
 * **Dictation reference = the video's own subtitles**: manual first, else automatic in the
   video's own language (never a machine translation); neither → refused (2026-09-20), never
   Deepgram. Audio stored as served (no FFmpeg); sentences shown as the captions spell them.
-* **Dictation is free; only its translation task calls Claude** (Haiku; the split is a model
-  call, 2026-09-26). Usage kinds `dictation_split` / `dictation_translation`.
+* **Dictation is free; only its translation task calls Claude** (the split is a Haiku call,
+  2026-09-26; the review is Sonnet 5 low since 2026-09-27). Usage kinds `dictation_split` / `dictation_translation`.
 * **Dictation stays out of the learner model** — results and translation mistakes live only in
   the lesson dir, never `attempts.jsonl` / item bank. They surface as «сложные слова» and count
   for the streak and the daily workout.

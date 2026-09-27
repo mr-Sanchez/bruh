@@ -33,6 +33,36 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
 
 ## Done
 
+- **2026-09-27 — A translation card's answer can be dictated.** «Надиктовать» under the
+  answer field records up to 60 s (the shared `Recorder`), `POST /api/learner/dictate` sends
+  the clip to Deepgram (English profile with `filler_words` off — it is an answer, not a
+  fluency take) and the text is added to the field; the learner can fix a misheard word and
+  then «Проверить» as usual. The clip is not kept (not a recording, never in «История»);
+  Deepgram time is logged as usage `card_dictation` (≈ 0.05 ¢ per answer). Decided by me.
+
+- **2026-09-27 — Word cards picked from a set's vocabulary.** Decided with the user: the
+  set's own call also writes `SET_VOCABULARY` (8) useful words / phrases for the topic and
+  context (English, Russian, an example + its translation, an optional Russian note;
+  ≈ +0.2 ¢, no extra click), stored as the set's `vocabulary`. After every run the results
+  screen lists them with checkboxes; «Сохранить в карточки» saves the whole choice
+  (`PUT /api/practice/sets/<id>/vocabulary`, $0) into `data/word_picks.jsonl` (append-only,
+  authoritative, newest record per set + word wins, so unticking takes the card away).
+  Each pick is a bank item of kind `word` (bank v6): Russian front, recall, «Показать
+  ответ», Anki-style self-grade «Помню / Не помню»; the back has the English, the example
+  with its translation, the note and YouGlish / Cambridge / SkELL. Same Leitner boxes, but a
+  word is never reset by speech and closes after a correct review in box 5. **Own daily
+  allowance** of new words (`NEW_WORDS_PER_DAY` = 5), apart from the 7–10 mistake cards.
+  Words carry no topic (they do not move topic accuracy), only `lesson_id`. A new set's
+  request lists the learner's word cards so its vocabulary suggests others. Sets written
+  before have no vocabulary. **Still to check:** the vocabulary's quality on the real API.
+
+- **2026-09-27 — Translation review and lesson tasks move to Sonnet.** Decided with the
+  user: the dictation's translation review is the same kind of judgement as card grading, so
+  it goes to Sonnet 5 (`effort: low`, ≈ 2 ¢ per part instead of ≈ 0.5 ¢); the split into
+  parts stays on Haiku (`TRANSLATION_SPLIT_MODEL` / `TRANSLATION_REVIEW_MODEL`). A lesson's
+  spoken tasks too (≈ 2 ¢ per click, rare and kept): a task the rule can be dodged in makes
+  the rule score meaningless. Own-context speaking prompts stay on Haiku.
+
 - **2026-09-26 — Translations graded by Sonnet; a mistake is filed under its own topic.**
   Haiku failed a right answer («before a call» for «before the call»), named the wrong
   mistake («missing article before people» for «it was» → «there were») and nitpicked

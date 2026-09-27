@@ -58,6 +58,10 @@ class FakeTranscriber:
         self.raw_response = raw_response or {"ok": True}
 
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
+        return self.transcribe_bytes(audio_path.read_bytes())
+
+    def transcribe_bytes(self, audio: bytes, *, source: str = "upload") -> TranscriptionResult:
+        self.last_audio = audio
         return TranscriptionResult(
             transcript=self.transcript,
             raw_response=self.raw_response,
@@ -144,6 +148,16 @@ SET_EXERCISES = [
 ]
 
 
+SET_VOCABULARY = [
+    {"id": "v1", "english": "roll back a release", "russian": "откатить релиз",
+     "example": "We had to roll back the release.", "example_russian": "Пришлось откатить релиз.",
+     "note": ""},
+    {"id": "v2", "english": "so far", "russian": "пока что, до сих пор",
+     "example": "So far we have fixed two bugs.", "example_russian": "Пока что мы починили два бага.",
+     "note": "Сигнал Present Perfect."},
+]
+
+
 class FakeGenerator:
     """Generates SET_EXERCISES; grades a translation right when it has "have"."""
 
@@ -154,10 +168,12 @@ class FakeGenerator:
         self.graded: List[List[TranslationAnswer]] = []
         self.fail_grading: Optional[Exception] = None
 
-    def generate(self, topic, seeds, avoid=(), theme=None, lesson=None) -> GenerationResult:
+    def generate(
+        self, topic, seeds, avoid=(), theme=None, lesson=None, known_words=()
+    ) -> GenerationResult:
         self.generated.append(
             {"topic": topic, "seeds": list(seeds), "avoid": list(avoid), "theme": theme,
-             "lesson": lesson}
+             "lesson": lesson, "known_words": list(known_words)}
         )
         # Every later set gets new sentences, as the prompt asks: repeats are dropped.
         suffix = "" if len(self.generated) == 1 else f" ({len(self.generated)})"
@@ -177,6 +193,7 @@ class FakeGenerator:
                 request_id="gen-1",
                 effort="low",
             ),
+            vocabulary=[dict(entry) for entry in SET_VOCABULARY],
         )
 
     def grade(self, topic, answers) -> GradingResult:
@@ -1078,6 +1095,70 @@ class ApiTests(unittest.TestCase):
         ex3 = next(r for r in body["run"]["results"] if r["exercise_id"] == "ex3")
         self.assertEqual((ex3["graded_by"], ex3["correct"]), ("self", True))
 
+    def test_a_card_answer_can_be_dictated(self) -> None:
+        transcriber = FakeTranscriber(transcript=" I will deploy it after the code review. ")
+        profiles = []
+        fastapi_app.dependency_overrides[api.get_transcriber_factory] = lambda: (
+            lambda profile: profiles.append(profile) or transcriber
+        )
+        response = self.client.post(
+            "/api/learner/dictate",
+            files={"audio": ("answer.webm", b"webm-bytes", "audio/webm")},
+            data={"duration_seconds": "3.2"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["text"], "I will deploy it after the code review.")
+        self.assertEqual(transcriber.last_audio, b"webm-bytes")
+        self.assertEqual((profiles[0].language, profiles[0].filler_words), ("en-US", False))
+        usage = self.client.get("/api/usage").json()["by_purpose"]
+        self.assertEqual(usage["deepgram:card_dictation"]["calls"], 1)
+        # Nothing is kept as a recording.
+        self.assertEqual(self.client.get("/api/sessions").json()["sessions"], [])
+
+        empty = self.client.post(
+            "/api/learner/dictate", files={"audio": ("a.webm", b"", "audio/webm")}
+        )
+        self.assertEqual(empty.status_code, 400)
+        with patch.object(config, "CARD_DICTATION_MAX_BYTES", 4):
+            too_long = self.client.post(
+                "/api/learner/dictate", files={"audio": ("a.webm", b"12345", "audio/webm")}
+            )
+        self.assertEqual(too_long.status_code, 400)
+
+    def test_picked_vocabulary_becomes_word_cards(self) -> None:
+        created = self._create_set()
+        set_id = created["set"]["id"]
+        self.assertEqual([v["id"] for v in created["set"]["vocabulary"]], ["v1", "v2"])
+        self.assertEqual(created["picked_vocabulary"], [])
+        body = self._submit(set_id, self.GOOD_ANSWERS)
+        self.assertEqual(body["picked_vocabulary"], [])
+        self.assertEqual(body["words_per_day"], config.NEW_WORDS_PER_DAY)
+
+        url = f"/api/practice/sets/{set_id}/vocabulary"
+        self.assertEqual(self.client.put(url, json={"picked": ["v9"]}).status_code, 400)
+        saved = self.client.put(url, json={"picked": ["v2", "v1"]}).json()
+        self.assertEqual((saved["picked"], saved["added"], saved["removed"]), (["v1", "v2"], 2, 0))
+
+        words = [i for i in self.client.get("/api/learner/queue").json()["new"]
+                 if i["kind"] == "word"]
+        self.assertEqual([w["content"]["english"] for w in words], ["roll back a release", "so far"])
+        self.assertEqual(words[0]["exercise"], {"type": "flip"})
+        self.assertEqual(words[1]["content"]["note"], "Сигнал Present Perfect.")
+        self.assertEqual(words[0]["lesson_id"], "present_perfect")
+
+        # Unticking takes the card away; the choice is shown with the set.
+        saved = self.client.put(url, json={"picked": ["v2"]}).json()
+        self.assertEqual((saved["added"], saved["removed"]), (0, 1))
+        self.assertEqual(
+            self.client.get(f"/api/practice/sets/{set_id}").json()["picked_vocabulary"], ["v2"]
+        )
+        queue = self.client.get("/api/learner/queue").json()
+        self.assertEqual([i["content"]["english"] for i in queue["new"] if i["kind"] == "word"],
+                         ["so far"])
+        # The next set is told which words are already cards.
+        self._create_set(force=True)
+        self.assertEqual(self.fake_generator.generated[-1]["known_words"], ["so far"])
+
     def test_lesson_of_the_day_follows_the_mistakes_and_its_next_action(self) -> None:
         self._analyzed_session()  # a mistake on present_perfect
         with patch.object(config, "get_anthropic_api_key", return_value="key"):
@@ -1300,7 +1381,7 @@ class FakeTranslator:
             raise self.error
         self.splits.append(list(sentences))
         usage = {"input_tokens": 3_000, "output_tokens": 40}
-        return SplitResult(starts=[9, 19], call=ClaudeCall(config.TRANSLATION_MODEL, usage))
+        return SplitResult(starts=[9, 19], call=ClaudeCall(config.TRANSLATION_SPLIT_MODEL, usage))
 
     def review(self, sentences, translation, *, subtitle_language="en") -> ReviewResult:
         if self.error is not None:
@@ -1310,7 +1391,7 @@ class FakeTranslator:
         )
         usage = {"input_tokens": 700, "output_tokens": 400}
         review = {"quality": "fair", "summary": "Норм.", "issues": [], "model_translation": "x"}
-        return ReviewResult(review=review, call=ClaudeCall(config.TRANSLATION_MODEL, usage))
+        return ReviewResult(review=review, call=ClaudeCall(config.TRANSLATION_REVIEW_MODEL, usage))
 
 
 class DictationTranslationApiTests(unittest.TestCase):

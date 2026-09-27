@@ -51,7 +51,7 @@ const Api = (() => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lessons }),
       }),
-    // A lesson's spoken tasks; writing more is a paid Haiku click in a context.
+    // A lesson's spoken tasks; writing more is a paid Sonnet click in a context.
     getLessonTasks: (lessonId) => request(`/api/lessons/${encodeURIComponent(lessonId)}/tasks`),
     writeLessonTasks: (lessonId, theme) =>
       request(`/api/lessons/${encodeURIComponent(lessonId)}/tasks`, {
@@ -147,6 +147,20 @@ const Api = (() => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answers, context: context || null }),
       }),
+    // A spoken card answer -> text (Deepgram, English); the clip is not kept.
+    dictate: (blob, durationSeconds) => {
+      const form = new FormData();
+      form.append("audio", blob, "answer.webm");
+      form.append("duration_seconds", String(durationSeconds || 0));
+      return request("/api/learner/dictate", { method: "POST", body: form });
+    },
+    // Which of a set's vocabulary entries are word cards: the whole choice ($0).
+    saveWordPicks: (id, picked) =>
+      request(`/api/practice/sets/${encodeURIComponent(id)}/vocabulary`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ picked }),
+      }),
 
     // Dictation (Stage 7, free): importing a lesson runs in the background on
     // the server, so the list is polled until it is ready.
@@ -167,7 +181,7 @@ const Api = (() => {
         body: JSON.stringify(result),
       }),
     getDictationStats: () => request("/api/dictation/stats"),
-    // The translation task after a dictation: two explicit Haiku calls.
+    // The translation task after a dictation: two explicit calls (Haiku splits, Sonnet reviews).
     splitLesson: (id) =>
       request(`/api/dictation/lessons/${encodeURIComponent(id)}/parts`, { method: "POST" }),
     postPartTranslation: (id, part, text) =>

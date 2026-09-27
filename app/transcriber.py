@@ -150,6 +150,13 @@ class DeepgramTranscriber:
             audio = audio_path.read_bytes()
         except OSError as exc:
             raise TranscriptionError(f"Could not read the recording: {exc}") from exc
+        return self.transcribe_bytes(audio, source=str(audio_path))
+
+    def transcribe_bytes(self, audio: bytes, *, source: str = "upload") -> TranscriptionResult:
+        """Transcribe audio held in memory - a short spoken answer that is not
+        kept as a recording. Same request options as a recording."""
+        if not self._api_key:
+            raise MissingApiKeyError(config.MISSING_API_KEY_MESSAGE)
         if not audio:
             raise TranscriptionError("The recording is empty, nothing to transcribe.")
 
@@ -157,7 +164,7 @@ class DeepgramTranscriber:
         logger.info(
             "Transcription started: %s (%.1f MB, model=%s, language=%s, "
             "filler_words=%s, punctuate=True, smart_format=False)",
-            audio_path,
+            source,
             len(audio) / 1_048_576,
             profile.model,
             profile.language,
@@ -209,7 +216,7 @@ class DeepgramTranscriber:
             len(result.transcript),
         )
         if not result.transcript.strip():
-            logger.warning("Deepgram returned an empty transcript for %s", audio_path)
+            logger.warning("Deepgram returned an empty transcript for %s", source)
         return result
 
     # --------------------------------------------------------------- errors

@@ -578,3 +578,62 @@ class ExerciseSetTests(unittest.TestCase):
         self.assertEqual(item["content"]["quote"], "I go there yesterday")
         self.assertEqual([o.get("session_id") or o.get("set_id") for o in item["occurrences"]],
                          ["s1", "set-20260901-120000"])
+
+
+def pick(ts: dt.datetime, vocab_id: str, english: str, action: str = "add", set_id: str = "set-1"):
+    return {
+        "ts": ts.isoformat(),
+        "set_id": set_id,
+        "vocab_id": vocab_id,
+        "action": action,
+        "lesson_id": "present_perfect",
+        "word": {"english": english, "russian": "перевод", "example": "", "example_russian": "",
+                 "note": ""},
+    }
+
+
+class WordCardTests(unittest.TestCase):
+    def test_the_newest_pick_wins_and_the_same_word_from_two_sets_is_one_card(self) -> None:
+        picks = [
+            pick(day(1), "v1", "so far"),
+            pick(day(1), "v2", "roll back"),
+            pick(day(2), "v2", "roll back", action="remove"),
+            pick(day(3), "v4", "So far.", set_id="set-2"),
+        ]
+        bank = learner_model.build_bank([], word_items=learner_model.items_from_word_picks(picks))
+        self.assertEqual(len(bank), 1)
+        (item,) = bank.values()
+        self.assertEqual((item["kind"], item["topic"]), (learner_model.KIND_WORD, None))
+        self.assertEqual(item["content"]["english"], "so far")  # the first pick's wording
+        self.assertEqual(len(item["occurrences"]), 2)
+        self.assertFalse(learner_model.is_retired(item))
+
+    def test_a_word_is_not_reset_by_another_pick_and_closes_after_box_five(self) -> None:
+        items = learner_model.items_from_word_picks(
+            [pick(day(1), "v1", "so far"), pick(day(3, 18), "v1", "so far", set_id="set-2")]
+        )
+        (item,) = learner_model.build_bank([], word_items=items).values()
+        # Right on every due day: boxes 2..5 (intervals 2, 4, 8, 16 days).
+        answers = [attempt(day(1), True), attempt(day(3), True), attempt(day(7), True),
+                   attempt(day(15), True)]
+        state = learner_model.item_state(item, answers, [])
+        self.assertEqual((state.box, state.closed, state.due), (5, False, "2026-10-01"))
+        final = attempt(dt.datetime(2026, 10, 1, 12), True)
+        state = learner_model.item_state(item, answers + [final], [])
+        self.assertTrue(state.closed)
+        self.assertIsNone(state.due)
+
+    def test_word_cards_have_their_own_daily_allowance(self) -> None:
+        bank = DailyQueueTests()._bank(fixes=20, phrases=0)
+        picks = [pick(day(1), f"v{n}", f"word {n}") for n in range(8)]
+        for item in learner_model.items_from_word_picks(picks):
+            bank[item["id"]] = item
+        states = {i: learner_model.item_state(item, [], []) for i, item in bank.items()}
+        queue = learner_model.daily_queue(bank, states, {}, DailyQueueTests.TODAY)
+        kinds = [bank[i]["kind"] for i in queue["new"]]
+        self.assertEqual(kinds.count(KIND_FIX), 10)
+        self.assertEqual(kinds.count(learner_model.KIND_WORD), 5)
+        self.assertEqual(queue["new_words_limit"], 5)
+        self.assertEqual(queue["new_waiting"], 13)
+        word = next(i for i in queue["new"] if bank[i]["kind"] == learner_model.KIND_WORD)
+        self.assertEqual(learner_model.card_exercise(bank[word], states[word]), {"type": "flip"})

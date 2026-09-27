@@ -175,6 +175,10 @@ LEITNER_CLOSE_AFTER_RECORDINGS: Final[int] = 3
 NEW_ITEMS_PER_DAY_MAX: Final[int] = 10
 NEW_ITEMS_PER_DAY_MIN: Final[int] = 7
 REVIEW_BACKLOG_THRESHOLD: Final[int] = 30
+# Word cards (the learner's own picks from a set's vocabulary) have their own
+# daily allowance of new ones (decided 2026-09-27), so they never crowd out
+# mistake cards and vice versa. Reviews of both are always shown in full.
+NEW_WORDS_PER_DAY: Final[int] = 5
 # Topic accuracy is measured over this many most recent attempts.
 TOPIC_ACCURACY_WINDOW: Final[int] = 20
 
@@ -187,9 +191,18 @@ DRILLS_PER_ISSUE: Final[int] = 3
 # Claude (GRADING_MODEL) checks each typed answer; verdicts are cached here per
 # card sentence + answer, so the same answer twice is never paid for twice.
 CARD_VERDICTS_FILENAME: Final[str] = "card_verdicts.jsonl"
+# A card answer can be spoken instead of typed (2026-09-27): the clip goes to
+# Deepgram (English, no filler words - it is an answer, not a fluency take)
+# and the text lands in the answer field. Not kept as a recording; ≈ 0.05 ¢.
+CARD_DICTATION_MAX_SECONDS: Final[int] = 60
+CARD_DICTATION_MAX_BYTES: Final[int] = 3 * 1024 * 1024
 # A topic drill (an AI set run, a spoken drill) counts as "correct" in the
 # attempts log at this score; the exact score feeds topic accuracy.
 DRILL_PASS_SCORE: Final[float] = 0.8
+# Words and phrases the learner picked for cards from a set's vocabulary:
+# append-only, AUTHORITATIVE (the choice cannot be rebuilt), the newest record
+# per (set, word) wins - "add" or "remove".
+WORD_PICKS_FILENAME: Final[str] = "word_picks.jsonl"
 
 # --- Roadmap (Stage 8) --------------------------------------------------------
 # The learner's own marks on lessons («Пропустить», «Уже знаю»): append-only,
@@ -225,13 +238,16 @@ THEORY_OWN_MISTAKES: Final[int] = 6
 THEORY_COST_ESTIMATE_USD: Final[float] = 0.03
 
 # --- Lesson spoken task (Stage 8, R6) ---------------------------------------------
-# 1-2 minutes of speech that needs the lesson's rule. Haiku writes the tasks
+# 1-2 minutes of speech that needs the lesson's rule. Sonnet writes the tasks
 # on a click (a few per context, kept in data/lesson_tasks/<lesson>.json); the
 # take is an ordinary monologue analysed with the rule in focus, and its rule
 # score is logged once as a topic attempt of this exercise.
-LESSON_TASK_MODEL: Final[str] = "claude-haiku-4-5"
+# 2026-09-27: Haiku -> Sonnet. A task the rule can be dodged in makes the rule
+# score meaningless; tasks are written rarely and kept, so the price is noise.
+LESSON_TASK_MODEL: Final[str] = "claude-sonnet-5"
+LESSON_TASK_EFFORT: Final[str] = "low"
 LESSON_TASKS_PER_CALL: Final[int] = 3
-LESSON_TASK_MAX_TOKENS: Final[int] = 1_500
+LESSON_TASK_MAX_TOKENS: Final[int] = 4_000
 LESSON_TASKS_DIRNAME: Final[str] = "lesson_tasks"
 LESSON_TASK_EXERCISE: Final[str] = "lesson_task"
 
@@ -296,7 +312,7 @@ IMAGE_MAX_SIDE_PX: Final[int] = 1000
 # are graded by Claude in one call at the end of the set (decided 2026-09-19).
 EXERCISE_SET_MODEL: Final[str] = "claude-sonnet-5"
 EXERCISE_SET_EFFORT: Final[str] = "low"
-EXERCISE_SET_MAX_TOKENS: Final[int] = 8_000
+EXERCISE_SET_MAX_TOKENS: Final[int] = 10_000
 # Grading translations (a set's, and a card's on click) - Sonnet since
 # 2026-09-26: Haiku failed right answers ("a call" for "the call") and named
 # the wrong mistake, and its comment becomes the card's explanation. It also
@@ -309,6 +325,11 @@ EXERCISE_API_TIMEOUT_SECONDS: Final[int] = 180
 SET_GAPS: Final[int] = 3
 SET_FIXES: Final[int] = 2
 SET_TRANSLATIONS: Final[int] = 4
+# Useful words and phrases written along with a set (2026-09-27, same call,
+# ≈ +0.2 ¢), shown after the run; the learner picks which become RU -> EN cards.
+SET_VOCABULARY: Final[int] = 8
+# The learner's word cards listed in a set request, so new ones are suggested.
+SET_KNOWN_WORDS: Final[int] = 80
 # The learner's own items on the topic shown to the generator as seeds, and
 # earlier set sentences on the topic it is told not to repeat - enough for
 # ~10 sets (≈ 1.5k input tokens); an exercise that still repeats any earlier
@@ -390,15 +411,19 @@ WORKOUT_MINUTES_DICTATION: Final[float] = 4.0
 DICTATION_TRICKY_MIN_MISSES: Final[int] = 2
 DICTATION_TRICKY_LIMIT: Final[int] = 20
 
-# --- Dictation translation (Haiku, well under a cent per call) ------------
+# --- Dictation translation (about a cent per call) ------------------------
 # After the dictation, a lesson can be translated part by part (English ->
-# Russian). Two explicit clicks pay for it, both on Haiku: one call cuts the
-# lesson into parts at natural breaks (decided 2026-09-26 - a model, not
-# pauses), one call per part reviews the learner's translation. Both results
-# are kept on disk. Mistakes stay in the lesson: nothing goes to the item bank.
-TRANSLATION_MODEL: Final[str] = "claude-haiku-4-5"
+# Russian). Two explicit clicks pay for it: one Haiku call cuts the lesson
+# into parts at natural breaks (decided 2026-09-26 - a model, not pauses), one
+# Sonnet call per part reviews the learner's translation. Both results are
+# kept on disk. Mistakes stay in the lesson: nothing goes to the item bank.
+TRANSLATION_SPLIT_MODEL: Final[str] = "claude-haiku-4-5"
+# 2026-09-27: Haiku -> Sonnet, like GRADING_MODEL - judging a learner's answer
+# is where a wrong verdict teaches the wrong thing.
+TRANSLATION_REVIEW_MODEL: Final[str] = "claude-sonnet-5"
+TRANSLATION_REVIEW_EFFORT: Final[str] = "low"
 TRANSLATION_SPLIT_MAX_TOKENS: Final[int] = 1_500
-TRANSLATION_REVIEW_MAX_TOKENS: Final[int] = 3_000
+TRANSLATION_REVIEW_MAX_TOKENS: Final[int] = 6_000
 # A part is this many sentences; a lesson that fits in one part needs no call.
 TRANSLATION_PART_MIN_SENTENCES: Final[int] = 5
 TRANSLATION_PART_MAX_SENTENCES: Final[int] = 15

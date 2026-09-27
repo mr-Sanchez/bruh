@@ -62,7 +62,7 @@ class SplitTests(unittest.TestCase):
         result = translator.split(["First one.", "Second one."])
 
         call = messages.calls[0]
-        self.assertEqual(call["model"], config.TRANSLATION_MODEL)
+        self.assertEqual(call["model"], config.TRANSLATION_SPLIT_MODEL)
         self.assertNotIn("output_config", call)  # Haiku takes no effort
         self.assertEqual(call["messages"][0]["content"], "0: First one.\n1: Second one.")
         self.assertIn("5-15 sentences", call["system"])
@@ -78,7 +78,11 @@ class ReviewTests(unittest.TestCase):
             ["Today we talk about code review."], " Сегодня мы говорим о проверке кода. "
         )
 
-        request = messages.calls[0]["messages"][0]["content"]
+        call = messages.calls[0]
+        self.assertEqual(call["model"], config.TRANSLATION_REVIEW_MODEL)
+        self.assertEqual(call["output_config"], {"effort": config.TRANSLATION_REVIEW_EFFORT})
+        self.assertEqual(result.call.effort, config.TRANSLATION_REVIEW_EFFORT)
+        request = call["messages"][0]["content"]
         self.assertIn("Original (English):\n1: Today we talk about code review.", request)
         self.assertIn("translation (Russian):\nСегодня мы говорим о проверке кода.", request)
         self.assertIn("into Russian", messages.calls[0]["system"])

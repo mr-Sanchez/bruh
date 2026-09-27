@@ -18,6 +18,10 @@ later switch from flat files to SQLite stays local to it. The files:
   data/roadmap_marks.jsonl
                        append-only, AUTHORITATIVE - the learner's «Пропустить» /
                        «Уже знаю» marks on roadmap lessons, the newest wins;
+  data/word_picks.jsonl
+                       append-only, AUTHORITATIVE - words and phrases the learner
+                       picked from a set's vocabulary as word cards (or took
+                       back), the newest record per set + word wins;
   data/theory/*.json   every version of a lesson's theory (paid, not rebuildable);
   data/lesson_tasks/*.json
                        spoken tasks Claude wrote for a lesson (paid, append-only);
@@ -62,7 +66,8 @@ logger = logging.getLogger(__name__)
 # v3: fix items carry `drills` + `focus`; fixes without drills are retired.
 # v4: fix items carry `focus_examples` (the rule's examples); rule items are retired.
 # v5: topics are taxonomy v2 (app/curriculum.py).
-BANK_SCHEMA_VERSION = 5
+# v6: word cards picked from a set's vocabulary (kind "word").
+BANK_SCHEMA_VERSION = 6
 SET_SCHEMA_VERSION = 1
 ATTEMPT_RECORD_VERSION = 1
 USAGE_RECORD_VERSION = 1
@@ -76,6 +81,7 @@ _marks_lock = threading.Lock()
 _theory_lock = threading.Lock()
 _tasks_lock = threading.Lock()
 _module_tests_lock = threading.Lock()
+_picks_lock = threading.Lock()
 
 
 def _bank_path() -> Path:
@@ -107,7 +113,11 @@ def rebuild_item_bank(recordings_root: Optional[Path] = None) -> Dict[str, Any]:
             }
             for s in sessions
         ],
-        "items": learner_model.build_bank(sessions, _set_mistake_items()),
+        "items": learner_model.build_bank(
+            sessions,
+            _set_mistake_items(),
+            learner_model.items_from_word_picks(load_word_picks()),
+        ),
     }
     with _bank_lock:
         config.data_dir().mkdir(parents=True, exist_ok=True)
@@ -784,6 +794,85 @@ def record_set_run(
         and not learner_model.is_retired(after[item["id"]])
     }
     return {"run": run, "new_cards": len(new_cards), "set": set_summary(exercise_set)}
+
+
+# -------------------------------------------------------------- word cards
+def _picks_path() -> Path:
+    return config.data_dir() / config.WORD_PICKS_FILENAME
+
+
+def load_word_picks() -> List[Dict[str, Any]]:
+    return [
+        record
+        for record in utils.read_jsonl(_picks_path())
+        if isinstance(record.get("ts"), str) and isinstance(record.get("set_id"), str)
+    ]
+
+
+def picked_vocabulary(set_id: str) -> List[str]:
+    """Ids of the set's vocabulary entries that are word cards right now."""
+    latest: Dict[str, str] = {}
+    for record in sorted(load_word_picks(), key=lambda r: r["ts"]):
+        if record["set_id"] == set_id:
+            latest[record.get("vocab_id")] = record.get("action")
+    return [vocab_id for vocab_id, action in latest.items() if action == "add"]
+
+
+def set_word_picks(
+    set_id: str, chosen: List[str], now: Optional[dt.datetime] = None
+) -> Dict[str, Any]:
+    """Make exactly `chosen` (vocabulary ids of the set) its word cards.
+
+    Only the difference is logged: an "add" for each newly chosen entry, a
+    "remove" for each one no longer chosen. The word itself goes into the
+    record, so the bank is rebuilt from the log alone. A removed card keeps
+    its attempts in the log; picking it again brings its history back.
+    """
+    exercise_set = load_set(set_id)
+    if exercise_set is None:
+        raise KeyError(set_id)
+    vocabulary = {entry["id"]: entry for entry in exercise_set.get("vocabulary") or []}
+    unknown = [vocab_id for vocab_id in chosen if vocab_id not in vocabulary]
+    if unknown:
+        raise ValueError(f"Unknown vocabulary ids: {', '.join(unknown)}")
+    ts = (now or dt.datetime.now()).isoformat(timespec="seconds")
+    with _picks_lock:
+        current = set(picked_vocabulary(set_id))
+        wanted = set(chosen)
+        changes = [(v, "add") for v in vocabulary if v in wanted - current]
+        changes += [(v, "remove") for v in vocabulary if v in current - wanted]
+        for vocab_id, action in changes:
+            entry = vocabulary[vocab_id]
+            utils.append_jsonl(
+                _picks_path(),
+                {
+                    "ts": ts,
+                    "set_id": set_id,
+                    "vocab_id": vocab_id,
+                    "action": action,
+                    "lesson_id": exercise_set.get("lesson_id"),
+                    "word": {k: v for k, v in entry.items() if k != "id"},
+                },
+            )
+    if changes:
+        rebuild_item_bank()
+    return {
+        "picked": sorted(wanted, key=list(vocabulary).index),
+        "added": sum(1 for _, action in changes if action == "add"),
+        "removed": sum(1 for _, action in changes if action == "remove"),
+    }
+
+
+def known_words(limit: int = config.SET_KNOWN_WORDS) -> List[str]:
+    """The English of the learner's word cards, newest first, for a new set's
+    vocabulary to avoid."""
+    items = [
+        item
+        for item in load_item_bank()["items"].values()
+        if item.get("kind") == learner_model.KIND_WORD
+    ]
+    items.sort(key=lambda i: max(o["at"] for o in i["occurrences"]), reverse=True)
+    return [item["content"]["english"] for item in items[:limit]]
 
 
 def _set_mistake_items() -> List[Dict[str, Any]]:

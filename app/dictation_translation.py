@@ -1,15 +1,15 @@
-"""Claude layer of the dictation's translation task (Haiku, two calls in all).
+"""Claude layer of the dictation's translation task (two calls in all).
 
 After a lesson has been dictated the learner translates it, a part at a time
 (English -> Russian, or the other way round for a Russian video). Two explicit
-clicks spend money, both on the cheapest model:
+clicks spend money:
 
-  * `split`   - one call per lesson: which sentences open a new part, so that
+  * `split`   - one Haiku call per lesson: which sentences open a new part, so that
                 each part is one train of thought. Only the numbered sentences
                 go in and a list of numbers comes out; `dictation.plan_parts`
                 repairs the answer. A lesson that fits in one part needs no
                 call at all.
-  * `review`  - one call per submitted translation: what is wrong, why, and how
+  * `review`  - one Sonnet call per submitted translation: what is wrong, why, and how
                 to say it better. There is no reference translation to pay for
                 first - the model judges the learner's text against the source.
 
@@ -143,6 +143,7 @@ class LessonTranslator:
         )
         logger.info("Lesson split requested: %d sentences", len(sentences))
         response = self._call(
+            model=config.TRANSLATION_SPLIT_MODEL,
             max_tokens=config.TRANSLATION_SPLIT_MAX_TOKENS,
             system=system,
             messages=[{"role": "user", "content": numbered(sentences)}],
@@ -150,7 +151,7 @@ class LessonTranslator:
         )
         return SplitResult(
             starts=list(response.parsed_output.starts),
-            call=_call_info(response, config.TRANSLATION_MODEL),
+            call=_call_info(response, config.TRANSLATION_SPLIT_MODEL),
         )
 
     def review(
@@ -168,10 +169,13 @@ class LessonTranslator:
         )
         logger.info("Translation review requested: %d sentences", len(sentences))
         response = self._call(
+            model=config.TRANSLATION_REVIEW_MODEL,
             max_tokens=config.TRANSLATION_REVIEW_MAX_TOKENS,
             system=REVIEW_PROMPT.format(source=source, target=target),
             messages=[{"role": "user", "content": request}],
             output_format=TranslationReview,
+            output_config={"effort": config.TRANSLATION_REVIEW_EFFORT},
+            thinking={"type": "adaptive"},
         )
         parsed: TranslationReview = response.parsed_output
         review = {
@@ -184,7 +188,12 @@ class LessonTranslator:
             ],
             "model_translation": parsed.model_translation.strip(),
         }
-        return ReviewResult(review=review, call=_call_info(response, config.TRANSLATION_MODEL))
+        return ReviewResult(
+            review=review,
+            call=_call_info(
+                response, config.TRANSLATION_REVIEW_MODEL, config.TRANSLATION_REVIEW_EFFORT
+            ),
+        )
 
     # -------------------------------------------------------------- helpers
     def _call(self, **kwargs: Any) -> Any:
@@ -192,9 +201,7 @@ class LessonTranslator:
             raise MissingAnthropicApiKeyError(config.MISSING_ANTHROPIC_API_KEY_MESSAGE)
         try:
             client = self._client_factory(self._api_key)
-            response = client.messages.parse(
-                model=config.TRANSLATION_MODEL, timeout=self._timeout_seconds, **kwargs
-            )
+            response = client.messages.parse(timeout=self._timeout_seconds, **kwargs)
         except Exception as exc:
             raise friendly_api_error(
                 exc, "Claude API не ответил вовремя. Попробуйте ещё раз."

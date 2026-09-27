@@ -16,6 +16,7 @@ mirroring the client_factory pattern already used inside those modules.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import logging
 import mimetypes
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -52,7 +54,7 @@ from app.analyzer import (
 from app.dictation_translation import LessonTranslator
 from app.exercise_sets import ExerciseSetGenerator, TranslationAnswer
 from app.theory import TheoryWriter, own_mistakes_from_items
-from app.transcriber import DeepgramTranscriber, TranscriptionError
+from app.transcriber import DeepgramTranscriber, MissingApiKeyError, TranscriptionError
 from app.utils import Session
 from app.youtube import (
     NoSubtitlesError,
@@ -115,7 +117,7 @@ def get_fetcher_factory() -> FetcherFactory:
 
 
 def get_translator_factory() -> TranslatorFactory:
-    """Haiku for the dictation's translation task (splitting and reviewing)."""
+    """Claude for the dictation's translation task (Haiku splits, Sonnet reviews)."""
 
     def factory() -> LessonTranslator:
         return LessonTranslator(config.get_anthropic_api_key())
@@ -881,7 +883,7 @@ def post_lesson_tasks(
     body: LessonTasksRequest = LessonTasksRequest(),
     generator_factory: GeneratorFactory = Depends(get_generator_factory),
 ) -> Dict[str, Any]:
-    """Claude (Haiku) writes a few spoken tasks for the lesson in the chosen
+    """Claude (Sonnet) writes a few spoken tasks for the lesson in the chosen
     context - a click, ~0.1 cent; they are kept and added to the list."""
     _roadmap_lesson_or_404(lesson_id)
     topic = curriculum.topic_info(lesson_id)
@@ -1137,6 +1139,39 @@ def check_card(
     return {**verdict, "graded_by": "claude", "cost_usd": usage["cost_usd"]}
 
 
+@router.post("/learner/dictate")
+async def dictate_card_answer(
+    audio: UploadFile = File(...),
+    duration_seconds: float = Form(0.0),
+    transcriber_factory: TranscriberFactory = Depends(get_transcriber_factory),
+) -> Dict[str, Any]:
+    """A spoken card answer -> text for the answer field (Deepgram, English).
+
+    The learner can still edit the text before «Проверить»; the check itself
+    is the usual one. The clip is not saved: it is an answer, like typed text,
+    not a recording for «История». Deepgram's time is logged as usual.
+    """
+    data = await audio.read(config.CARD_DICTATION_MAX_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="Запись пустая.")
+    if len(data) > config.CARD_DICTATION_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="Запись слишком длинная.")
+    # No filler words: "uh, I have" is not what the learner means to answer.
+    profile = dataclasses.replace(
+        config.profile_by_key(config.DEFAULT_LANGUAGE_KEY), filler_words=False
+    )
+    transcriber = transcriber_factory(profile)
+    try:
+        result = await run_in_threadpool(transcriber.transcribe_bytes, data, source="card answer")
+    except MissingApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except TranscriptionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    audio_seconds = result.audio_duration or duration_seconds
+    usage = learner_store.record_deepgram_usage("card_dictation", profile.key, audio_seconds)
+    return {"text": result.transcript.strip(), "cost_usd": usage["cost_usd"]}
+
+
 @router.get("/learner/today")
 def get_learner_today() -> Dict[str, Any]:
     """The «Сегодня» workout: cards, a live activity, dictation, extras."""
@@ -1183,7 +1218,7 @@ def get_talk_series() -> Dict[str, Any]:
 # plus the sentences of its own subtitle track, typed word by word. Free by
 # construction: the dictation itself calls neither Deepgram nor Claude, and a
 # video without usable subtitles is refused rather than transcribed (decided
-# 2026-09-20). Only the optional translation task after it costs Haiku calls
+# 2026-09-20). Only the optional translation task after it costs Claude calls
 # (cut into parts, review a translation), each on an explicit click.
 _LESSON_ID_PATTERN = r"^[A-Za-z0-9_-]{6,20}$"
 
@@ -1359,7 +1394,7 @@ def post_part_translation(
     body: TranslationRequest,
     translator_factory: TranslatorFactory = Depends(get_translator_factory),
 ) -> Dict[str, Any]:
-    """Store the learner's translation of one part and have Haiku review it.
+    """Store the learner's translation of one part and have Sonnet review it.
 
     The text is saved before Claude is asked, so a missing key or a failed
     call never loses it; the same text sent again reuses the stored review.
@@ -1450,6 +1485,8 @@ def _set_payload(exercise_set: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
     return {
         "set": {k: v for k, v in exercise_set.items() if k != "verdicts"},
         "summary": learner_store.set_summary(exercise_set),
+        # Which of the set's vocabulary entries are word cards right now.
+        "picked_vocabulary": learner_store.picked_vocabulary(exercise_set["id"]),
         **extra,
     }
 
@@ -1507,6 +1544,7 @@ def create_exercise_set(
             learner_store.set_avoid_sentences(body.topic),
             theme=theme,
             lesson=lesson,
+            known_words=learner_store.known_words(),
         )
     except MissingAnthropicApiKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1535,6 +1573,9 @@ def create_exercise_set(
         "theory_version": theory_version,
         "intro": result.intro,
         "exercises": exercises,
+        # Word card candidates, shown after a run (2026-09-27); sets written
+        # before that have none.
+        "vocabulary": result.vocabulary,
         "generation": {
             "model": result.call.model,
             "effort": result.call.effort,
@@ -1656,4 +1697,23 @@ def submit_exercise_set(
         "run": recorded["run"],
         "new_cards": recorded["new_cards"],
         "summary": recorded["set"],
+        "picked_vocabulary": learner_store.picked_vocabulary(set_id),
+        "words_per_day": config.NEW_WORDS_PER_DAY,
     }
+
+
+class WordPicksRequest(BaseModel):
+    """The set's vocabulary ids that should be word cards - the whole choice,
+    so unticking an entry takes its card away."""
+
+    picked: List[str] = Field(max_length=50)
+
+
+@router.put("/practice/sets/{set_id}/vocabulary")
+def put_set_word_picks(set_id: str, body: WordPicksRequest) -> Dict[str, Any]:
+    """Save which words and phrases of a set become RU -> EN word cards ($0)."""
+    _set_or_404(set_id)
+    try:
+        return learner_store.set_word_picks(set_id, list(dict.fromkeys(body.picked)))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

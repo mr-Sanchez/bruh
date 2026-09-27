@@ -106,12 +106,12 @@ Views.practice = (() => {
     if (!total) {
       const nothingYet = queue.new_waiting === 0;
       return nothingYet
-        ? `<p class="muted">Карточек пока нет. Они появляются из анализа записей — запишите монолог и нажмите «Анализировать».</p>`
+        ? `<p class="muted">Карточек пока нет. Они появляются из анализа записей («Анализировать»), из ошибок в наборах упражнений и из слов, которые вы отметили после набора.</p>`
         : `<p>На сегодня всё.</p><p class="muted">Новые карточки (${queue.new_waiting}) ждут следующих дней.</p>`;
     }
     return `
       <p>Повторить: <strong>${queue.reviews.length}</strong> · новых: <strong>${queue.new.length}</strong>
-        <span class="muted">(лимит новых в день: ${queue.new_limit}, начато сегодня: ${queue.new_started_today})</span></p>
+        <span class="muted">(лимит новых в день: ${queue.new_limit}, начато сегодня: ${queue.new_started_today}; новых слов: до ${queue.new_words_limit}, начато: ${queue.new_words_started_today})</span></p>
       ${queue.new_waiting ? `<p class="muted">Ещё ${queue.new_waiting} новых ждут следующих дней.</p>` : ""}
       <div class="button-row"><button data-role="start-daily">Начать (${total})</button></div>`;
   }
@@ -324,7 +324,7 @@ Views.practice = (() => {
         ${
           data.anthropic_configured
             ? `<div class="button-row"><button class="${tasks.length ? "secondary" : ""}" data-role="write-tasks">
-                 ${tasks.length ? "Ещё задания" : "Придумать задания"} · ≈ 0.1 ¢</button></div>`
+                 ${tasks.length ? "Ещё задания" : "Придумать задания"} · ≈ 2 ¢</button></div>`
             : `<p class="muted">Чтобы Claude придумал задания, нужен ANTHROPIC_API_KEY.</p>`
         }
         <p class="muted" data-role="tasks-status"></p>`;

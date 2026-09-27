@@ -18,6 +18,8 @@ from app.exercise_sets import (  # noqa: E402
     GapExercise,
     GeneratedSet,
     Grading,
+    LessonTask,
+    LessonTasks,
     TranslateExercise,
     TranslationAnswer,
     Verdict,
@@ -131,6 +133,25 @@ class GenerateTests(unittest.TestCase):
             generator.generate(TOPIC, [])
 
 
+class LessonTaskTests(unittest.TestCase):
+    def test_lesson_tasks_go_to_sonnet_with_the_lesson_and_context(self) -> None:
+        generator, messages = generator_with(LessonTasks(tasks=[
+            LessonTask(question=" Tell us about a release. ", hint="что уже сделано",
+                       use="I have shipped"),
+            LessonTask(question="No hint.", hint=" ", use=""),
+        ]))
+
+        result = generator.write_lesson_tasks(TOPIC, "b1")
+
+        call = messages.calls[0]
+        self.assertEqual(call["model"], config.LESSON_TASK_MODEL)
+        self.assertEqual(call["output_config"], {"effort": config.LESSON_TASK_EFFORT})
+        self.assertIn("Lesson topic: Времена (present_perfect)", call["messages"][0]["content"])
+        # A task without a hint is dropped; text is trimmed.
+        self.assertEqual([t["question"] for t in result.prompts], ["Tell us about a release."])
+        self.assertEqual(result.call.effort, config.LESSON_TASK_EFFORT)
+
+
 class GradeTests(unittest.TestCase):
     def test_grade_maps_verdicts_back_to_exercise_ids(self) -> None:
         grading = Grading(verdicts=[
@@ -168,3 +189,26 @@ class GradeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VocabularyTests(unittest.TestCase):
+    def test_vocabulary_is_cleaned_and_known_words_go_into_the_request(self) -> None:
+        from app.exercise_sets import VocabularyItem
+
+        parsed = sample_set()
+        parsed.vocabulary = [
+            VocabularyItem(english="so far", russian="пока что", example="So far so good.",
+                           example_russian="Пока всё хорошо.", note=" Сигнал Present Perfect. "),
+            VocabularyItem(english="So far!", russian="до сих пор", example="", example_russian=""),
+            VocabularyItem(english="have + V3", russian="формула", example="", example_russian=""),
+            VocabularyItem(english="deadline", russian="", example="", example_russian=""),
+            VocabularyItem(english="roll back", russian="откатить", example="", example_russian=""),
+        ]
+        generator, messages = generator_with(parsed)
+        result = generator.generate(TOPIC, [], known_words=["reach out", "a tight deadline"])
+        self.assertEqual([(v["id"], v["english"]) for v in result.vocabulary],
+                         [("v1", "so far"), ("v2", "roll back")])
+        self.assertEqual(result.vocabulary[0]["note"], "Сигнал Present Perfect.")
+        call = messages.calls[0]
+        self.assertIn("reach out; a tight deadline", call["messages"][0]["content"])
+        self.assertIn(f"exactly {config.SET_VOCABULARY} useful English words", call["system"])

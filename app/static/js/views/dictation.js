@@ -4,7 +4,7 @@
 //   #/dictation            lessons: import a link, see progress, continue one
 //   #/dictation/<videoId>  the workspace: one sentence at a time
 // Under the typing card, translation.js offers the optional translation task
-// (Haiku, on explicit clicks). Checking is entirely local (the same rules as app/dictation.py: case and
+// (Claude, on explicit clicks). Checking is entirely local (the same rules as app/dictation.py: case and
 // punctuation are ignored); each finished sentence is logged to the server,
 // which grades it again and owns the statistics.
 window.Views = window.Views || {};
@@ -61,7 +61,7 @@ Views.dictation = (() => {
         <p class="muted">Вставьте ссылку на видео с YouTube — приложение возьмёт его субтитры как
           эталон и разобьёт на предложения. Наберите каждое на слух: проверка идёт по буквам,
           подсказка по клавише Tab. Сам диктант бесплатный: ни Deepgram, ни Claude тут не участвуют.
-          Перевод услышанного по частям — по кнопке под диктантом, это копейки на Haiku.</p>
+          Перевод услышанного по частям — по кнопке под диктантом, это пара центов на Claude.</p>
         <form class="dictation-import" data-role="import">
           <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=..."
             aria-label="Ссылка на видео" required />

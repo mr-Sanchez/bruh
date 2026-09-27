@@ -14,6 +14,11 @@ easy to hard:
                  set's answers in a single call at the end (decided 2026-09-19:
                  one call is cheaper than one per answer).
 
+The same call also writes a few useful words and phrases on the set's topic
+and context (`vocabulary`, 2026-09-27). They are shown after the run and the
+learner picks which ones become RU -> EN word cards (learner_store); nothing
+becomes a card without that choice.
+
 Everything costs money, so nothing here runs on its own: api.py calls it on
 an explicit click, and learner_store keeps the result on disk for reuse.
 
@@ -72,11 +77,20 @@ class TranslateExercise(BaseModel):
     focus: str
 
 
+class VocabularyItem(BaseModel):
+    english: str
+    russian: str
+    example: str
+    example_russian: str
+    note: str = ""
+
+
 class GeneratedSet(BaseModel):
     intro: str
     gaps: List[GapExercise] = Field(default_factory=list)
     fixes: List[FixExercise] = Field(default_factory=list)
     translations: List[TranslateExercise] = Field(default_factory=list)
+    vocabulary: List[VocabularyItem] = Field(default_factory=list)
 
 
 class Verdict(BaseModel):
@@ -147,6 +161,9 @@ class GenerationResult:
     intro: str
     exercises: List[Dict[str, Any]]
     call: ClaudeCall
+    # Word card candidates: [{"id", "english", "russian", "example",
+    # "example_russian", "note"}], see assemble_vocabulary.
+    vocabulary: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -201,6 +218,19 @@ fixes, if any. `explanation`: one Russian sentence.
 English translation needs the target construction. `reference`: a natural \
 English translation. `focus`: a short Russian cue naming the construction to \
 use (for example "Present Perfect: have done").
+- `vocabulary`: exactly {vocabulary} useful English words or phrases worth \
+learning as flashcards: natural collocations, phrasal verbs, set phrases and \
+words a learner at this level needs in the request's context, tied to the \
+topic where that makes sense (for a grammar topic: phrases that go with the \
+construction, such as "by the time", "so far"). No grammar notation or \
+formulas ("have + V3"), no very basic single words. `english`: the word or \
+phrase as it is learned ("reach out to someone", "a tight deadline"). \
+`russian`: its natural Russian equivalent - the front of the card, so it \
+must lead to this English and not to a looser synonym. `example`: a short \
+English sentence using it in the context. `example_russian`: that sentence \
+in Russian. `note`: optional, one short Russian remark - register, a typical \
+mistake of Russian speakers, or how it differs from a similar word; empty \
+when there is nothing useful to say.
 
 Rules:
 - Context: every sentence is set in the situations named on the request's \
@@ -329,6 +359,7 @@ class ExerciseSetGenerator:
         avoid: Sequence[str] = (),
         theme: Optional[Dict[str, Optional[str]]] = None,
         lesson: Optional[Dict[str, Any]] = None,
+        known_words: Sequence[str] = (),
     ) -> GenerationResult:
         """A new set on `topic` ({"key", "label", "description"}).
 
@@ -337,13 +368,18 @@ class ExerciseSetGenerator:
         sentences are set in (None: the default, IT / backend), `lesson`
         the roadmap lesson it is for - {"level", "theory"} (theory: the
         content of its latest version, or None) - so a lesson's set trains
-        exactly what its theory taught, at its level.
+        exactly what its theory taught, at its level. `known_words` are the
+        words and phrases the learner already has as cards, so the set's
+        vocabulary suggests new ones.
         """
         self._require_key()
         system = GENERATION_PROMPT.format(
-            gaps=config.SET_GAPS, fixes=config.SET_FIXES, translations=config.SET_TRANSLATIONS
+            gaps=config.SET_GAPS,
+            fixes=config.SET_FIXES,
+            translations=config.SET_TRANSLATIONS,
+            vocabulary=config.SET_VOCABULARY,
         )
-        user = _generation_request(topic, seeds, avoid, theme, lesson)
+        user = _generation_request(topic, seeds, avoid, theme, lesson, known_words)
         logger.info("Exercise set requested: topic=%s, seeds=%d", topic["key"], len(seeds))
         response = self._call(
             model=config.EXERCISE_SET_MODEL,
@@ -362,6 +398,7 @@ class ExerciseSetGenerator:
             intro=parsed.intro.strip(),
             exercises=exercises,
             call=_call_info(response, config.EXERCISE_SET_MODEL, config.EXERCISE_SET_EFFORT),
+            vocabulary=assemble_vocabulary(parsed),
         )
 
     def grade(self, topic: Dict[str, str], answers: Sequence[TranslationAnswer]) -> GradingResult:
@@ -478,6 +515,8 @@ class ExerciseSetGenerator:
             system=LESSON_TASKS_PROMPT.format(count=config.LESSON_TASKS_PER_CALL),
             messages=[{"role": "user", "content": request}],
             output_format=LessonTasks,
+            output_config={"effort": config.LESSON_TASK_EFFORT},
+            thinking={"type": "adaptive"},
         )
         tasks = [
             {"question": t.question.strip(), "hint": t.hint.strip(), "use": t.use.strip()}
@@ -486,7 +525,10 @@ class ExerciseSetGenerator:
         ][: config.LESSON_TASKS_PER_CALL]
         if not tasks:
             raise AnalysisError("Claude не придумал ни одного задания. Попробуйте ещё раз.")
-        return PromptsResult(prompts=tasks, call=_call_info(response, config.LESSON_TASK_MODEL))
+        return PromptsResult(
+            prompts=tasks,
+            call=_call_info(response, config.LESSON_TASK_MODEL, config.LESSON_TASK_EFFORT),
+        )
 
     # -------------------------------------------------------------- helpers
     def _require_key(self) -> None:
@@ -523,6 +565,7 @@ def _generation_request(
     avoid: Sequence[str],
     theme: Optional[Dict[str, Optional[str]]] = None,
     lesson: Optional[Dict[str, Any]] = None,
+    known_words: Sequence[str] = (),
 ) -> str:
     lines = [
         f"Topic: {topic['label']} ({topic['key']}) - {topic.get('description', '')}",
@@ -550,6 +593,9 @@ def _generation_request(
     if avoid:
         lines += ["", "Sentences from earlier sets - do not repeat them:"]
         lines += [f"- {sentence}" for sentence in avoid]
+    if known_words:
+        lines += ["", "Words and phrases the learner already has as cards - suggest other ones:"]
+        lines.append("; ".join(known_words))
     lines += ["", "Write the set."]
     return "\n".join(lines)
 
@@ -660,3 +706,34 @@ def assemble_exercises(parsed: GeneratedSet) -> List[Dict[str, Any]]:
     for number, exercise in enumerate(exercises, start=1):
         exercise["id"] = f"ex{number}"
     return exercises
+
+
+def assemble_vocabulary(parsed: GeneratedSet) -> List[Dict[str, str]]:
+    """The set's word card candidates with stable ids (v1, v2...).
+
+    Entries without an English or a Russian side are dropped, and so are
+    formulas ("have + V3") and repeats of the same English: a card needs one
+    phrase to recall from one Russian prompt.
+    """
+    vocabulary: List[Dict[str, str]] = []
+    seen = set()
+    for entry in parsed.vocabulary:
+        english, russian = entry.english.strip(), entry.russian.strip()
+        key = _sentence_key(english)
+        if not key or not russian or "+" in english or key in seen:
+            continue
+        seen.add(key)
+        vocabulary.append(
+            {
+                "english": english,
+                "russian": russian,
+                "example": entry.example.strip(),
+                "example_russian": entry.example_russian.strip(),
+                "note": entry.note.strip(),
+            }
+        )
+        if len(vocabulary) == config.SET_VOCABULARY:
+            break
+    for number, entry in enumerate(vocabulary, start=1):
+        entry["id"] = f"v{number}"
+    return vocabulary

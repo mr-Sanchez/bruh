@@ -1,4 +1,4 @@
-# Voice Practice Coach - runtime dependencies
+# English Coach - runtime dependencies
 deepgram-sdk>=7.8.0,<8.0.0    # official Deepgram Python SDK (Listen v1 API)
 anthropic>=1.0.0,<2.0.0       # Claude API (speech analysis/feedback)
 fastapi>=0.115,<1.0.0         # local web backend
@@ -8,5 +8,5 @@ python-dotenv>=1.0.0,<2.0.0   # optional .env support for API keys
 yt-dlp>=2025.1.15             # dictation: YouTube audio + subtitles (no FFmpeg needed)
 
 # PyInstaller packaging is deferred while the app is a local web server -
-# see README "Running the app" / "Packaging" sections.
+# see README, section 8 (Tests / Packaging).
 # pip install pyinstaller
