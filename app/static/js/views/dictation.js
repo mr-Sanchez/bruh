@@ -202,6 +202,7 @@ Views.dictation = (() => {
     let repeatsLeft = prefs.repeat;
     let logged = false;
     let advanceTimer = null; // the hop to the next sentence after a correct one
+    let advancePending = false; // correct, but the sentence is still playing
     let repeatTimer = null; // the wait before a sentence is played again
     let watchTimer = null; // stops the audio at the end of the sentence
     let userPaused = false;
@@ -394,10 +395,19 @@ Views.dictation = (() => {
       } catch (err) {
         verdict.textContent += ` · результат не сохранён: ${err.message}`;
       }
-      if (index < sentences.length - 1) {
-        clearTimeout(advanceTimer);
-        advanceTimer = setTimeout(() => go(index + 1), 900);
+      advanceAfterListening();
+    }
+
+    // A sentence typed while it still plays is heard to the end first: the
+    // hop to the next one waits for the segment to finish.
+    function advanceAfterListening() {
+      if (index >= sentences.length - 1) return;
+      if (!audio.paused && audio.currentTime < sentence().end) {
+        advancePending = true;
+        return;
       }
+      clearTimeout(advanceTimer);
+      advanceTimer = setTimeout(() => go(index + 1), 900);
     }
 
     function go(target) {
@@ -447,6 +457,12 @@ Views.dictation = (() => {
 
     function onSegmentEnd() {
       stopWatch();
+      if (advancePending) {
+        advancePending = false;
+        clearTimeout(advanceTimer);
+        advanceTimer = setTimeout(() => go(index + 1), 600);
+        return;
+      }
       if (userPaused || allCorrect() || repeatsLeft <= 0) return;
       if (repeatsLeft !== Infinity) repeatsLeft -= 1;
       clearTimeout(repeatTimer);
@@ -459,6 +475,7 @@ Views.dictation = (() => {
 
     function play() {
       clearTimeout(advanceTimer);
+      advancePending = false;
       clearTimeout(repeatTimer);
       repeatTimer = null;
       userPaused = false;

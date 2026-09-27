@@ -836,7 +836,7 @@ a.activity:hover { border-color: var(--plum-border); color: var(--text); }
   color: var(--text);
   min-width: 3ch;
 }
-.dict-word:focus { outline: 0; border-bottom-color: var(--accent); background: var(--accent-weak); border-radius: 6px 6px 0 0; }
+.dict-word:focus { outline: 0; border-bottom-color: var(--warning); background: var(--accent-weak); border-radius: 6px 6px 0 0; }
 .dict-word.is-correct { color: var(--success); border-bottom-color: var(--success); }
 .dict-word.is-wrong { color: var(--danger); border-bottom-color: var(--danger); }
 .dict-word.is-hinted { font-style: italic; border-bottom-style: dashed; }
