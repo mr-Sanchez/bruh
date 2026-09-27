@@ -30,6 +30,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app import (
+    assistant,
+    chat_store,
     config,
     curriculum,
     dictation,
@@ -55,6 +57,7 @@ from app.analyzer import (
     ImageInput,
     MissingAnthropicApiKeyError,
 )
+from app.assistant import Assistant
 from app.dictation_translation import LessonTranslator
 from app.exercise_sets import ExerciseSetGenerator, TranslationAnswer
 from app.text_translation import TextTranslator
@@ -80,6 +83,7 @@ FetcherFactory = Callable[[], YouTubeFetcher]
 TranslatorFactory = Callable[[], LessonTranslator]
 TheoryWriterFactory = Callable[[], TheoryWriter]
 TextTranslatorFactory = Callable[[], TextTranslator]
+AssistantFactory = Callable[[], Assistant]
 
 
 # ------------------------------------------------------------- dependencies
@@ -136,6 +140,15 @@ def get_text_translator_factory() -> TextTranslatorFactory:
 
     def factory() -> TextTranslator:
         return TextTranslator(config.get_anthropic_api_key())
+
+    return factory
+
+
+def get_assistant_factory() -> AssistantFactory:
+    """Claude for «Спросить ИИ» (Sonnet answers questions about a screen)."""
+
+    def factory() -> Assistant:
+        return Assistant(config.get_anthropic_api_key())
 
     return factory
 
@@ -1985,3 +1998,128 @@ def put_text_word_picks(text_id: str, body: TextPhrasesRequest) -> Dict[str, Any
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# -------------------------------------------------------------- /assistant
+# «Спросить ИИ» (2026-09-27): the learner selects text on any screen and asks
+# about it in a chat. Creating a chat or adding a question is free; only
+# /reply calls Claude - on the learner's «Отправить» - and it answers a
+# question that is still open, so a repeated click never pays twice.
+class ScreenInfo(BaseModel):
+    title: str = Field(default="", max_length=200)
+    route: str = Field(default="", max_length=200)
+
+
+class CreateChatRequest(BaseModel):
+    question: str = Field(max_length=config.ASSISTANT_MESSAGE_MAX_CHARS)
+    selection: str = Field(default="", max_length=config.ASSISTANT_SELECTION_MAX_CHARS)
+    context: str = Field(default="", max_length=config.ASSISTANT_CONTEXT_MAX_CHARS)
+    screen: ScreenInfo = Field(default_factory=ScreenInfo)
+
+
+class ChatMessageRequest(BaseModel):
+    text: str = Field(max_length=config.ASSISTANT_MESSAGE_MAX_CHARS)
+
+
+def _chat_or_404(chat_id: str) -> Dict[str, Any]:
+    # The id becomes a file name: only the exact generated shape is accepted.
+    if not re.fullmatch(chat_store.ID_PATTERN, chat_id):
+        raise HTTPException(status_code=400, detail="Invalid chat id.")
+    chat = chat_store.load_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Unknown chat.")
+    return chat
+
+
+def _assistant_cost() -> float:
+    return learner_store.average_claude_cost("assistant", config.ASSISTANT_COST_ESTIMATE_USD)
+
+
+def _chat_payload(chat: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        **chat,
+        "awaits_answer": chat_store.awaits_answer(chat),
+        "full": len(chat.get("messages") or []) >= config.ASSISTANT_MAX_MESSAGES,
+        "cost_usd": _assistant_cost(),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+def _question(text: str) -> str:
+    question = text.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Вопрос пустой.")
+    return question
+
+
+@router.get("/assistant/chats")
+def list_assistant_chats() -> Dict[str, Any]:
+    """Every chat (the most recently active first) and what an answer costs."""
+    return {
+        "chats": [chat_store.chat_summary(c) for c in chat_store.list_chats()],
+        "cost_usd": _assistant_cost(),
+        "anthropic_configured": config.get_anthropic_api_key() is not None,
+    }
+
+
+@router.post("/assistant/chats", status_code=201)
+def create_assistant_chat(body: CreateChatRequest) -> Dict[str, Any]:
+    """Open a chat with the selection, its card and the first question ($0)."""
+    chat = chat_store.create_chat(
+        question=_question(body.question),
+        selection=body.selection.strip(),
+        context=body.context.strip(),
+        screen=body.screen.model_dump(),
+    )
+    return _chat_payload(chat)
+
+
+@router.get("/assistant/chats/{chat_id}")
+def get_assistant_chat(chat_id: str) -> Dict[str, Any]:
+    return _chat_payload(_chat_or_404(chat_id))
+
+
+@router.post("/assistant/chats/{chat_id}/messages", status_code=201)
+def add_assistant_message(chat_id: str, body: ChatMessageRequest) -> Dict[str, Any]:
+    """Add the learner's next question ($0); /reply answers it."""
+    chat = _chat_or_404(chat_id)
+    if chat_store.awaits_answer(chat):
+        raise HTTPException(status_code=409, detail="Сначала дождитесь ответа на прошлый вопрос.")
+    if len(chat.get("messages") or []) >= config.ASSISTANT_MAX_MESSAGES:
+        raise HTTPException(
+            status_code=400, detail="Диалог слишком длинный — начните новый."
+        )
+    question = _question(body.text)
+    return _chat_payload(chat_store.add_message(chat_id, {"role": "user", "text": question}))
+
+
+@router.post("/assistant/chats/{chat_id}/reply")
+def reply_in_assistant_chat(
+    chat_id: str,
+    assistant_factory: AssistantFactory = Depends(get_assistant_factory),
+) -> Dict[str, Any]:
+    """Have Claude answer the open question (a paid click). A chat with no
+    open question comes back as it is, so nothing is paid for twice."""
+    chat = _chat_or_404(chat_id)
+    if not chat_store.awaits_answer(chat):
+        return _chat_payload(chat)
+    try:
+        result = assistant_factory().reply(assistant.api_messages(chat))
+    except MissingAnthropicApiKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AnalysisError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    usage = learner_store.record_claude_usage(
+        "assistant", result.call.model, result.call.usage, session_id=chat_id
+    )
+    chat = chat_store.add_message(
+        chat_id,
+        {
+            "role": "assistant",
+            "text": result.text,
+            "model": result.call.model,
+            "request_id": result.call.request_id,
+            "cost_usd": usage["cost_usd"],
+        },
+    )
+    return _chat_payload(chat)

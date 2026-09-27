@@ -11,6 +11,7 @@ const Icons = (() => {
     progress: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
     compass: '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
     check: '<path d="M5 12l5 5L20 7"/>',
+    close: '<path d="M6 6l12 12M18 6L6 18"/>',
     mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
     image:
       '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>',

@@ -472,6 +472,22 @@ TEXT_WRITE_COST_ESTIMATE_USD: Final[float] = 0.01
 TEXT_REVIEW_COST_ESTIMATE_USD: Final[float] = 0.03
 TEXTS_DIRNAME: Final[str] = "translate"
 
+# --- Assistant (2026-09-27, a cent or two per answer) -------------------
+# «Спросить ИИ»: the learner selects text on any screen, asks about it, and
+# talks it over with Claude in a panel above the page. The selection, the
+# card around it and the question open a chat; every answer is a click on
+# «Отправить», and every chat is kept (data/assistant/<id>.json).
+ASSISTANT_MODEL: Final[str] = "claude-sonnet-5"
+ASSISTANT_EFFORT: Final[str] = "low"
+ASSISTANT_MAX_TOKENS: Final[int] = 4_000
+ASSISTANT_SELECTION_MAX_CHARS: Final[int] = 2_000
+ASSISTANT_CONTEXT_MAX_CHARS: Final[int] = 6_000
+ASSISTANT_MESSAGE_MAX_CHARS: Final[int] = 2_000
+# The whole chat is sent with every answer, so a chat has a length limit.
+ASSISTANT_MAX_MESSAGES: Final[int] = 40
+ASSISTANT_COST_ESTIMATE_USD: Final[float] = 0.015
+ASSISTANT_DIRNAME: Final[str] = "assistant"
+
 # --- Pricing (estimates for the usage log, USD) --------------------------
 # Per million tokens: (input, output). Cache writes bill at 1.25x input,
 # cache reads at 0.1x input. Unknown models are logged with cost_usd = None.
@@ -562,6 +578,11 @@ def dictation_dir() -> Path:
 def texts_dir() -> Path:
     """Texts to translate with every translation and review (data/translate/<id>.json)."""
     return data_dir() / TEXTS_DIRNAME
+
+
+def assistant_dir() -> Path:
+    """Chats with the assistant, every message kept (data/assistant/<chat id>.json)."""
+    return data_dir() / ASSISTANT_DIRNAME
 
 
 def load_environment() -> None:

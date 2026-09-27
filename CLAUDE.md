@@ -35,6 +35,7 @@ app/exercise_sets.py    Claude: AI exercise sets (generate + grade: Sonnet 5 low
 app/dictation_translation.py  Claude: cut a lesson into parts (Haiku), review a translation (Sonnet)
 app/theory.py           Claude: a roadmap lesson's theory (Sonnet 5 low)
 app/text_translation.py Claude: «Перевод текста» - write a text, review a translation (Sonnet)
+app/assistant.py        Claude: «Спросить ИИ» - a chat about a selected fragment (Sonnet 5 low)
 app/speech_drills.py    pure: pace, fillers, pauses, shadowing alignment from word timings
 app/dictation.py        pure: WebVTT parsing, sentences, word checking, translation parts
 app/learner_model.py    pure: item bank, Leitner state, topic mastery
@@ -48,8 +49,10 @@ app/progress_store.py   topic aggregation + score history → data/progress.json
 app/theme_store.py      the ONLY reader/writer of data/themes.json (own contexts, last used)
 app/verb_store.py       the ONLY reader/writer of data/irregular_verbs.jsonl
 app/text_store.py       the ONLY reader/writer of data/translate/ (texts + reviews)
+app/chat_store.py       the ONLY reader/writer of data/assistant/ (assistant chats)
 app/static/js/          app.js (hash router), api.js, drill.js, recorder.js (shared by every
                         spoken activity), themes.js (the «уклон» picker), charts.js,
+                        assistant.js (selection bubble + chat panel, outside the router),
                         icons.js, translation.js, views/*.js
 app/static/css/app.css  «Закат» dark theme: colour tokens on :root, sidebar shell
 ```
@@ -78,6 +81,8 @@ data/lesson_tasks/<lesson>.json    spoken tasks Claude wrote for a lesson; paid,
 data/module_tests/<module>.json    module entry tests + every run; paid, append-only
 data/translate/<text-id>.json      a text to translate (Claude's or pasted) + every
                                    translation with its review; paid, NOT rebuildable
+data/assistant/<chat-id>.json      a chat: selection, its card, screen, every message;
+                                   paid, append-only
 data/dictation/<video-id>/         lesson.json, audio.<ext>, subtitles.vtt, parts.json,
                                    results.jsonl (AUTHORITATIVE), translations.jsonl (paid)
 logs/app.log                       rotating, 1 MB × 4
@@ -105,6 +110,11 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
   text saved before Claude is asked, same text reuses the review) → `PUT .../<id>/phrases`
   picks word cards through the shared `word_picks.jsonl` (`set_id` = the text id). Stays out
   of `attempts.jsonl`; the translation can be dictated (`/api/learner/dictate`, `language=ru`).
+* **Спросить ИИ** (any screen): selecting text in `#app` shows a bubble; the question goes
+  with the selection, the innermost card around it (`innerText`, labels included) and the
+  page title. `POST /api/assistant/chats` and `.../messages` store a question ($0);
+  `.../reply` (on «Отправить») has Sonnet answer an open question - a chat with none is
+  returned as is, a failed call keeps the question. Whole chat sent each time, ≤ 40 messages.
 * **Dictation:** `POST /api/dictation/lessons` (YouTube link) → background yt-dlp import →
   poll until `ready`/`error`. Each sentence is posted to `.../results` and graded **again**
   server-side. Afterwards an optional translation task: `POST .../parts`, then

@@ -33,6 +33,17 @@ Target navigation: `Сегодня` (new home: daily workout) · `Занятия
 
 ## Done
 
+- **2026-09-27 — «Спросить ИИ»: a chat about any selected text.** Asked for by the user (a
+  review said «нужно прошедшее время» where the English has present simple, and there was no
+  way to ask why). Selecting text anywhere in the app shows a «Спросить ИИ» bubble; the panel
+  on the right opens with the selection, the card around it (its visible text: the quote,
+  «Вы написали», the correction, the mistake kind) and the screen title, which all go to
+  Claude with the question. Then an ordinary chat. Sonnet 5 low, plain text with light
+  Markdown, always Russian (≈ 0.4 ¢ for the first answer; each answer resends the chat).
+  Every chat is kept in `data/assistant/` (decided with the user: «храним историю»), listed
+  under «История» in the panel; a question is saved before Claude is asked. Usage kind
+  `assistant`. `Assistant.open()` is ready for the side button the user wants later.
+
 - **2026-09-27 — «Перевод текста» (EN → RU).** Asked for by the user: an English text is
   either written by Claude (Sonnet 5 low, ≈ 1 ¢) in the chosen «уклон» at a size — short /
   medium / long ≈ 5 / 10 / 15 minutes of translating (80–110 / 160–200 / 240–290 words) — and

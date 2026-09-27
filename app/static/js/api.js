@@ -193,6 +193,25 @@ const Api = (() => {
         body: JSON.stringify({ picked }),
       }),
 
+    // «Спросить ИИ»: a chat about a selected fragment. Opening a chat and
+    // adding a question are free; only replyInChat calls Claude (paid).
+    listChats: () => request("/api/assistant/chats"),
+    getChat: (id) => request(`/api/assistant/chats/${encodeURIComponent(id)}`),
+    createChat: (payload) =>
+      request("/api/assistant/chats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+    addChatMessage: (id, text) =>
+      request(`/api/assistant/chats/${encodeURIComponent(id)}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      }),
+    replyInChat: (id) =>
+      request(`/api/assistant/chats/${encodeURIComponent(id)}/reply`, { method: "POST" }),
+
     // Dictation (Stage 7, free): importing a lesson runs in the background on
     // the server, so the list is polled until it is ready.
     listLessons: () => request("/api/dictation/lessons"),
