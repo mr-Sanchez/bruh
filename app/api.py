@@ -547,7 +547,9 @@ def analyze_session(
 ) -> Dict[str, Any]:
     session = _load_session_or_404(session_id)
     if session.is_drill:
-        raise HTTPException(status_code=400, detail="Речевые тренажёры не анализируются Claude.")
+        raise HTTPException(
+            status_code=400, detail="Речевые тренажёры не анализируются ИИ ассистентом."
+        )
     if not session.transcript:
         raise HTTPException(status_code=400, detail="This session has no transcript yet.")
 
@@ -860,7 +862,7 @@ def post_module_test(
     questions = module_test.assemble(result.test, lessons)
     if not module_test.complete_enough(questions, lessons):
         raise HTTPException(
-            status_code=502, detail="Claude составил неполный тест. Попробуйте ещё раз."
+            status_code=502, detail="ИИ ассистент составил неполный тест. Попробуйте ещё раз."
         )
     test = learner_store.add_module_test(
         module.key,
@@ -1187,7 +1189,9 @@ def check_card(
     usage = learner_store.record_claude_usage("card_grading", graded.call.model, graded.call.usage)
     verdict = graded.verdicts.get(item_id)
     if verdict is None:
-        raise HTTPException(status_code=502, detail="Claude не проверил ответ. Попробуйте ещё раз.")
+        raise HTTPException(
+            status_code=502, detail="ИИ ассистент не проверил ответ. Попробуйте ещё раз."
+        )
     learner_store.store_card_verdict(
         item_id, drill["russian"], answer, verdict, model=graded.call.model, cost=usage["cost_usd"]
     )
@@ -1662,7 +1666,7 @@ def create_exercise_set(
     )
     if not exercises:
         raise HTTPException(
-            status_code=502, detail="Claude повторил старые упражнения. Попробуйте ещё раз."
+            status_code=502, detail="ИИ ассистент повторил старые упражнения. Попробуйте ещё раз."
         )
     exercise_set = {
         "schema_version": learner_store.SET_SCHEMA_VERSION,
@@ -1784,7 +1788,7 @@ def submit_exercise_set(
         missing = [p.exercise_id for p in pending if p.exercise_id not in graded.verdicts]
         if missing:
             raise HTTPException(
-                status_code=502, detail="Claude проверил не все ответы. Попробуйте ещё раз."
+                status_code=502, detail="ИИ ассистент проверил не все ответы. Попробуйте ещё раз."
             )
         for result in results:
             verdict = graded.verdicts.get(result["exercise_id"])

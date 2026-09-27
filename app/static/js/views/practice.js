@@ -86,7 +86,7 @@ Views.practice = (() => {
           <a class="activity" href="#/talk">
             <span class="activity-icon tone-gold">${Icons.timer}</span>
             <span><strong>60 секунд</strong><br/>
-              <span class="topic-meta">Минута на тему, три раза подряд: темп, паразиты, паузы · без Claude</span></span>
+              <span class="topic-meta">Минута на тему, три раза подряд: темп, паразиты, паузы · без ИИ ассистента</span></span>
           </a>
           <a class="activity" href="#/dictation">
             <span class="activity-icon tone-teal">${Icons.headphones}</span>
@@ -101,12 +101,12 @@ Views.practice = (() => {
           <a class="activity" href="#/verbs">
             <span class="activity-icon tone-orange">${Icons.keyboard}</span>
             <span><strong>Неправильные глаголы</strong><br/>
-              <span class="topic-meta">Таблица по частоте и тренировка: перевод → три формы · без Claude</span></span>
+              <span class="topic-meta">Таблица по частоте и тренировка: перевод → три формы · без ИИ ассистента</span></span>
           </a>
           <a class="activity" href="#/shadowing">
             <span class="activity-icon tone-plum">${Icons.speak}</span>
             <span><strong>Shadowing</strong><br/>
-              <span class="topic-meta">Прочитать вслух свою «улучшенную версию» и увидеть, что не прозвучало · без Claude</span></span>
+              <span class="topic-meta">Прочитать вслух свою «улучшенную версию» и увидеть, что не прозвучало · без ИИ ассистента</span></span>
           </a>
         </div>
       </div>`;
@@ -292,7 +292,7 @@ Views.practice = (() => {
   async function loadSpoken(container, card, lessonId) {
     card.innerHTML = `
       <h2>Устное задание</h2>
-      <p class="muted">1–2 минуты речи на задание, где без правила урока не обойтись. Claude разберёт
+      <p class="muted">1–2 минуты речи на задание, где без правила урока не обойтись. ИИ ассистент разберёт
         запись как обычный монолог и отдельно оценит, как вы применили правило; ошибки попадут в карточки.</p>
       <div data-role="spoken-theme"></div>
       <div data-role="spoken-tasks"><p class="muted">Загрузка…</p></div>`;
@@ -335,7 +335,7 @@ Views.practice = (() => {
           data.anthropic_configured
             ? `<div class="button-row"><button class="${tasks.length ? "secondary" : ""}" data-role="write-tasks">
                  ${tasks.length ? "Ещё задания" : "Придумать задания"} · ≈ 2 ¢</button></div>`
-            : `<p class="muted">Чтобы Claude придумал задания, нужен ANTHROPIC_API_KEY.</p>`
+            : `<p class="muted">Чтобы ИИ ассистент придумал задания, нужен ANTHROPIC_API_KEY.</p>`
         }
         <p class="muted" data-role="tasks-status"></p>`;
       const write = list.querySelector('[data-role="write-tasks"]');
@@ -343,7 +343,7 @@ Views.practice = (() => {
         write.addEventListener("click", async () => {
           const status = list.querySelector('[data-role="tasks-status"]');
           write.disabled = true;
-          status.textContent = "Claude придумывает задания…";
+          status.textContent = "ИИ ассистент придумывает задания…";
           try {
             data = await Api.writeLessonTasks(lessonId, picker ? picker.value() : null);
             draw();
@@ -389,12 +389,12 @@ Views.practice = (() => {
     if (!t) {
       return `
         <h2>Теория</h2>
-        <p class="muted">Claude объяснит правило простыми словами на уровне урока, с примерами и типичными
+        <p class="muted">ИИ ассистент объяснит правило простыми словами на уровне урока, с примерами и типичными
           ошибками, и разберёт ваши собственные ошибки по этой теме из записей.</p>
         ${
           data.anthropic_configured
             ? `<div class="button-row"><button data-role="theory-write">Написать теорию · ${price}</button></div>`
-            : `<p class="muted">Чтобы Claude написал теорию, нужен ANTHROPIC_API_KEY.</p>`
+            : `<p class="muted">Чтобы ИИ ассистент написал теорию, нужен ANTHROPIC_API_KEY.</p>`
         }
         <p class="muted" data-role="theory-status"></p>`;
     }
@@ -494,7 +494,7 @@ Views.practice = (() => {
     write.addEventListener("click", async () => {
       const status = card.querySelector('[data-role="theory-status"]');
       write.disabled = true;
-      status.textContent = "Claude пишет теорию — обычно 20–60 секунд…";
+      status.textContent = "ИИ ассистент пишет теорию — обычно 20–60 секунд…";
       try {
         await Api.writeTheory(lessonId);
         if (root === container) loadTheory(container, card, lessonId);
@@ -522,7 +522,7 @@ Views.practice = (() => {
     return `
       <h2>${isLesson ? "Упражнения урока" : "AI-набор упражнений"}</h2>
       <p class="muted">8–10 новых предложений на ваших ошибках и правилах этой темы, в выбранном уклоне:
-        вставить пропущенное, исправить ошибку, перевести с русского. Переводы проверяет Claude.
+        вставить пропущенное, исправить ошибку, перевести с русского. Переводы проверяет ИИ ассистент.
         Ошибки становятся карточками.${
           isLesson ? " Если к уроку написана теория, набор тренирует именно её, на уровне урока." : ""
         } Новый набор не повторяет предложения прежних.</p>
@@ -598,7 +598,7 @@ Views.practice = (() => {
     if (create) {
       create.addEventListener("click", async () => {
         card.querySelectorAll("button").forEach((b) => (b.disabled = true));
-        status.textContent = "Claude составляет набор — обычно 10–30 секунд…";
+        status.textContent = "ИИ ассистент составляет набор — обычно 10–30 секунд…";
         try {
           run((await Api.createSet(topicKey, true, picker ? picker.value() : null)).set);
         } catch (err) {

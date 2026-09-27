@@ -154,7 +154,7 @@ window.Translation = (() => {
           }</span> ${escapeHtml(review.summary)}</p>
           ${issues}
           <details class="better-versions">
-            <summary>Как перевёл бы Claude</summary>
+            <summary>Как перевёл бы ИИ ассистент</summary>
             <p>${escapeHtml(review.model_translation)}</p>
           </details>
         </div>`;

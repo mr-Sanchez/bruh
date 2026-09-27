@@ -157,13 +157,13 @@ class TheoryWriter:
             )
         except Exception as exc:
             raise friendly_api_error(
-                exc, "Claude API не ответил вовремя. Попробуйте ещё раз."
+                exc, "ИИ ассистент не ответил вовремя. Попробуйте ещё раз."
             ) from exc
         if getattr(response, "stop_reason", None) == "refusal":
-            raise AnalysisError("Claude отказался выполнить запрос. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент отказался выполнить запрос. Попробуйте ещё раз.")
         parsed: Optional[LessonTheory] = getattr(response, "parsed_output", None)
         if parsed is None or not (parsed.summary.strip() and parsed.sections):
-            raise AnalysisError("Claude вернул пустую теорию. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент вернул пустую теорию. Попробуйте ещё раз.")
         return TheoryResult(
             content=parsed.model_dump(),
             call=_call_info(response, config.THEORY_MODEL, config.THEORY_EFFORT),

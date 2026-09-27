@@ -1,4 +1,4 @@
-"""Claude layer of «Перевод текста»: write a text, review its translation.
+"""ИИ ассистент layer of «Перевод текста»: write a text, review its translation.
 
 The learner reads an English text and translates it into Russian (typed or
 dictated). The text is either pasted by the learner (free) or written by
@@ -219,7 +219,7 @@ class TextTranslator:
         parsed: WrittenText = response.parsed_output
         text = parsed.text.strip()
         if not text:
-            raise AnalysisError("Claude вернул пустой текст. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент вернул пустой текст. Попробуйте ещё раз.")
         return WriteResult(
             title=parsed.title.strip() or "Текст",
             text=text,
@@ -283,12 +283,12 @@ class TextTranslator:
             response = client.messages.parse(timeout=self._timeout_seconds, **kwargs)
         except Exception as exc:
             raise friendly_api_error(
-                exc, "Claude API не ответил вовремя. Попробуйте ещё раз."
+                exc, "ИИ ассистент не ответил вовремя. Попробуйте ещё раз."
             ) from exc
         if getattr(response, "stop_reason", None) == "refusal":
-            raise AnalysisError("Claude отказался выполнить запрос. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент отказался выполнить запрос. Попробуйте ещё раз.")
         if getattr(response, "parsed_output", None) is None:
-            raise AnalysisError("Claude вернул ответ, который не удалось разобрать.")
+            raise AnalysisError("ИИ ассистент вернул ответ, который не удалось разобрать.")
         return response
 
 

@@ -484,13 +484,13 @@ class ClaudeAnalyzer:
                 getattr(response, "stop_details", None),
             )
             raise AnalysisError(
-                "Claude отказался анализировать эту запись. Попробуйте ещё раз "
+                "ИИ ассистент отказался анализировать эту запись. Попробуйте ещё раз "
                 "или проверьте содержимое транскрипта."
             )
 
         parsed = response.parsed_output
         if parsed is None:
-            raise AnalysisError("Claude вернул ответ, который не удалось разобрать.")
+            raise AnalysisError("ИИ ассистент вернул ответ, который не удалось разобрать.")
 
         topic_counts: Dict[str, int] = {}
         for issue in parsed.issues:
@@ -527,7 +527,7 @@ class ClaudeAnalyzer:
     def _to_friendly_error(self, exc: Exception) -> AnalysisError:
         return friendly_api_error(
             exc,
-            "Claude API не ответил вовремя. Транскрипт сохранён - "
+            "ИИ ассистент не ответил вовремя. Транскрипт сохранён - "
             "попробуйте выполнить анализ ещё раз.",
         )
 
@@ -544,7 +544,7 @@ def friendly_api_error(exc: Exception, timeout_message: str) -> AnalysisError:
     import anthropic
 
     if isinstance(exc, anthropic.AuthenticationError):
-        return AnalysisError("Claude отклонил API-ключ. Проверьте ANTHROPIC_API_KEY.")
+        return AnalysisError("ИИ ассистент отклонил API-ключ. Проверьте ANTHROPIC_API_KEY.")
     if isinstance(exc, anthropic.PermissionDeniedError):
         return AnalysisError("У ключа ANTHROPIC_API_KEY нет прав на эту операцию/модель.")
     if isinstance(exc, anthropic.RateLimitError):
@@ -554,19 +554,19 @@ def friendly_api_error(exc: Exception, timeout_message: str) -> AnalysisError:
             if retry_after
             else " Повторите попытку позже."
         )
-        return AnalysisError(f"Достигнут лимит запросов к Claude.{suffix}")
+        return AnalysisError(f"Достигнут лимит запросов к ИИ ассистенту.{suffix}")
     if isinstance(exc, anthropic.APITimeoutError):
         return AnalysisError(timeout_message)
     if isinstance(exc, anthropic.APIConnectionError):
         return AnalysisError(
-            "Не удалось связаться с Claude API. Проверьте подключение к "
+            "Не удалось связаться с ИИ ассистентом. Проверьте подключение к "
             "интернету и повторите попытку."
         )
     if isinstance(exc, anthropic.APIStatusError):
-        return AnalysisError(f"Ошибка Claude API (HTTP {exc.status_code}).")
+        return AnalysisError(f"Ошибка ИИ ассистента (HTTP {exc.status_code}).")
 
     logger.exception("Unexpected Claude API failure")
-    return AnalysisError(f"Не удалось выполнить запрос к Claude: {exc}")
+    return AnalysisError(f"Не удалось выполнить запрос к ИИ ассистенту: {exc}")
 
 
 def _clamped_scores(scores: Optional[Scores]) -> Optional[Scores]:

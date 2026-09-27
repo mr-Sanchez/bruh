@@ -41,7 +41,7 @@ Views.session = (() => {
         <div class="transcript-box">${escapeHtml(session.transcript || "(нет транскрипта)")}</div>
         <div class="button-row">
           <button id="analyze-btn" class="secondary">
-            ${session.analysis ? "Анализировать повторно" : "Анализировать (Claude)"}
+            ${session.analysis ? "Анализировать повторно" : "Анализировать (ИИ ассистент)"}
           </button>
         </div>
         <div id="analyze-theme"></div>
@@ -113,7 +113,7 @@ Views.session = (() => {
         slot.innerHTML = `<p class="muted">Ошибка анализа: ${escapeHtml(err.message)}</p>`;
       } finally {
         analyzeBtn.disabled = false;
-        analyzeBtn.textContent = session.analysis ? "Анализировать повторно" : "Анализировать (Claude)";
+        analyzeBtn.textContent = session.analysis ? "Анализировать повторно" : "Анализировать (ИИ ассистент)";
       }
     });
   }

@@ -141,7 +141,7 @@ Views.translate = (() => {
 
   function textRow(t) {
     const meta = [
-      t.origin === "custom" ? "свой текст" : t.theme && t.theme.label ? t.theme.label : "Claude",
+      t.origin === "custom" ? "свой текст" : t.theme && t.theme.label ? t.theme.label : "ИИ ассистент",
       t.level ? LEVEL_LABELS[t.level] : "",
       `${t.words} слов · ≈ ${t.minutes} мин`,
       (t.created_at || "").slice(0, 10),
@@ -195,7 +195,7 @@ Views.translate = (() => {
     generate.addEventListener("click", async () => {
       generate.disabled = true;
       if (picker) picker.disable(true);
-      generateStatus.textContent = "Claude пишет текст — обычно 10–30 секунд…";
+      generateStatus.textContent = "ИИ ассистент пишет текст — обычно 10–30 секунд…";
       try {
         const text = await Api.createText(size.value, level.value, picker ? picker.value() : null);
         location.hash = `#/translate/${encodeURIComponent(text.id)}`;
@@ -239,7 +239,7 @@ Views.translate = (() => {
     const last = (doc.attempts || [])[doc.attempts.length - 1];
     const initial = readStore(draftKey, null) ?? (last ? last.text : "");
     const meta = [
-      doc.origin === "custom" ? "Свой текст" : `Claude · ${doc.theme && doc.theme.label ? doc.theme.label : ""}`,
+      doc.origin === "custom" ? "Свой текст" : `ИИ ассистент · ${doc.theme && doc.theme.label ? doc.theme.label : ""}`,
       doc.level ? LEVEL_LABELS[doc.level] : "",
       `${doc.words} слов · перевод ≈ ${doc.minutes} мин`,
     ].filter(Boolean);

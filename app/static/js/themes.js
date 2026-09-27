@@ -196,7 +196,7 @@ const ThemePicker = (() => {
         const canWrite = meta && meta.can_generate && meta.anthropic_configured;
         promptHost.innerHTML = `
           <p class="muted">Для этого уклона тем ещё нет.${
-            canWrite ? " Claude придумает 8 тем для рассказа." : " Нужен ANTHROPIC_API_KEY, чтобы Claude их придумал."
+            canWrite ? " ИИ ассистент придумает 8 тем для рассказа." : " Нужен ANTHROPIC_API_KEY, чтобы ИИ ассистент их придумал."
           }</p>
           ${canWrite ? `<button type="button" class="secondary" data-role="write">Придумать темы · ≈ 0.1 ¢</button>` : ""}
           <span class="muted" data-role="write-status"></span>`;
@@ -235,7 +235,7 @@ const ThemePicker = (() => {
       if (generating) return;
       generating = true;
       button.disabled = true;
-      button.textContent = "Claude придумывает…";
+      button.textContent = "ИИ ассистент придумывает…";
       try {
         meta = await Api.writeThemePrompts(meta.theme.key);
         prompts = meta.prompts;
@@ -287,7 +287,7 @@ const ThemePicker = (() => {
       const picker = await mount(host);
       host.insertAdjacentHTML(
         "beforeend",
-        `<p class="muted">Уклон — для новых предложений-карточек, которые Claude напишет к каждой ошибке.</p>`
+        `<p class="muted">Уклон — для новых предложений-карточек, которые ИИ ассистент напишет к каждой ошибке.</p>`
       );
       return picker;
     } catch (err) {

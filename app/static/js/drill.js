@@ -381,7 +381,7 @@ const Drill = (() => {
         input.readOnly = true;
         stopDictation();
         buttons([]);
-        result.innerHTML = `<p class="muted">Claude проверяет…</p>`;
+        result.innerHTML = `<p class="muted">ИИ ассистент проверяет…</p>`;
         let verdict;
         try {
           verdict = await Api.checkCard(item.id, ex.drill, answer);
@@ -575,7 +575,7 @@ const Drill = (() => {
         <p class="set-russian">${escapeHtml(ex.russian)}</p>
         ${ex.focus ? `<p class="muted">Используйте: ${escapeHtml(ex.focus)}</p>` : ""}
         <textarea data-role="input" rows="2" placeholder="Ваш перевод" spellcheck="false"></textarea>
-        <p class="muted">Переводы проверит Claude в конце набора.</p>`;
+        <p class="muted">Переводы проверит ИИ ассистент в конце набора.</p>`;
     }
 
     function fullSentence(ex, filler) {
@@ -612,7 +612,7 @@ const Drill = (() => {
       container.innerHTML = `
         <div class="card drill-card">
           <h2>Проверяем…</h2>
-          <p class="muted">Claude проверяет переводы — это несколько секунд.</p>
+          <p class="muted">ИИ ассистент проверяет переводы — это несколько секунд.</p>
         </div>`;
       const list = exercises.map((ex) => {
         const entry = { ...answers[ex.id] };

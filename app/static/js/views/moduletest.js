@@ -46,7 +46,7 @@ Views.moduletest = (() => {
             ? ""
             : data.anthropic_configured
             ? `<div class="button-row"><button data-role="new-test">Составить тест · ≈ ${formatCents(data.cost_estimate_usd)}</button></div>`
-            : `<p class="muted">Чтобы Claude составил тест, нужен ANTHROPIC_API_KEY.</p>`
+            : `<p class="muted">Чтобы ИИ ассистент составил тест, нужен ANTHROPIC_API_KEY.</p>`
         }
         <p class="muted" data-role="status"></p>
       </div>
@@ -190,7 +190,7 @@ Views.moduletest = (() => {
     container.querySelectorAll('[data-role="new-test"]').forEach((button) =>
       button.addEventListener("click", async () => {
         button.disabled = true;
-        status.textContent = "Claude составляет тест — обычно 20–40 секунд…";
+        status.textContent = "ИИ ассистент составляет тест — обычно 20–40 секунд…";
         status.scrollIntoView({ block: "center" });
         try {
           draw(container, await Api.createModuleTest(moduleKey), true);

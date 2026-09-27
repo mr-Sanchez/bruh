@@ -321,7 +321,7 @@ Views.progress = (() => {
       <div class="card">
         <h2>Расходы на API</h2>
         <p>Всего: <strong>$${usage.total_usd.toFixed(2)}</strong>
-          <span class="muted">· Claude ${cents(usage.by_service_usd.anthropic || 0)}
+          <span class="muted">· ИИ ассистент ${cents(usage.by_service_usd.anthropic || 0)}
           · Deepgram ${cents(usage.by_service_usd.deepgram || 0)}</span></p>
         ${analysis ? `<p class="muted">Анализ монолога в среднем: ${cents(analysis.avg_cost_usd)} (${analysis.calls} шт.)</p>` : ""}
         ${picture ? `<p class="muted">Анализ описания картинки в среднем: ${cents(picture.avg_cost_usd)} (${picture.calls} шт.)</p>` : ""}

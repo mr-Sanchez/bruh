@@ -93,7 +93,7 @@ Views.record = (() => {
         </div>
       </div>
       <p class="muted">Опишите картинку: кто на ней, где это, что происходит, какое настроение.
-        1–2 минуты. После анализа Claude подскажет, что вы не упомянули, и даст слова для этой сцены.</p>`;
+        1–2 минуты. После анализа ИИ ассистент подскажет, что вы не упомянули, и даст слова для этой сцены.</p>`;
   }
 
   // `param` is a speaking-prompt id when the view is opened from «Сегодня»
@@ -151,7 +151,7 @@ Views.record = (() => {
         <h2 id="transcript-title">Транскрипт</h2>
         <div id="transcript" class="transcript-box"></div>
         <div class="button-row">
-          <button id="analyze-btn" class="secondary">Анализировать (Claude)</button>
+          <button id="analyze-btn" class="secondary">Анализировать (ИИ ассистент)</button>
           <button id="copy-btn" class="secondary">Скопировать</button>
         </div>
         <div id="analyze-theme"></div>
@@ -190,7 +190,7 @@ Views.record = (() => {
                <div class="muted">${escapeHtml(data.lesson.label)} · ${escapeHtml(lessonTask.hint)}</div>
                <p class="speaking-question">${escapeHtml(lessonTask.question)}</p>
                ${lessonTask.use ? `<p><strong>Используйте:</strong> ${escapeHtml(lessonTask.use)}</p>` : ""}
-               <p class="muted">Говорите 1–2 минуты. После «Анализировать» Claude отдельно оценит,
+               <p class="muted">Говорите 1–2 минуты. После «Анализировать» ИИ ассистент отдельно оценит,
                  как вы применили правило урока; ошибки попадут в карточки.</p>
              </div>`
           : `<p class="muted">Задание не найдено — вернитесь к уроку.</p>`;
@@ -437,7 +437,7 @@ Views.record = (() => {
           slot.innerHTML = `<p class="muted">Ошибка анализа: ${escapeHtml(err.message)}</p>`;
         } finally {
           analyzeBtn.disabled = false;
-          analyzeBtn.textContent = "Анализировать (Claude)";
+          analyzeBtn.textContent = "Анализировать (ИИ ассистент)";
         }
       };
 

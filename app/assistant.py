@@ -1,4 +1,4 @@
-"""Claude layer of «Спросить ИИ»: a chat about a fragment of any screen.
+"""ИИ ассистент layer of «Спросить ИИ»: a chat about a fragment of any screen.
 
 The learner selects text anywhere in the app - a mistake in a review, a
 card, a theory paragraph - and asks about it (the user's brief, 2026-09-27:
@@ -122,17 +122,17 @@ class Assistant:
             )
         except Exception as exc:
             raise friendly_api_error(
-                exc, "Claude API не ответил вовремя. Попробуйте ещё раз."
+                exc, "ИИ ассистент не ответил вовремя. Попробуйте ещё раз."
             ) from exc
         if getattr(response, "stop_reason", None) == "refusal":
-            raise AnalysisError("Claude отказался отвечать. Попробуйте переформулировать.")
+            raise AnalysisError("ИИ ассистент отказался отвечать. Попробуйте переформулировать.")
         text = "".join(
             getattr(block, "text", "")
             for block in getattr(response, "content", None) or []
             if getattr(block, "type", None) == "text"
         ).strip()
         if not text:
-            raise AnalysisError("Claude вернул пустой ответ. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент вернул пустой ответ. Попробуйте ещё раз.")
         return ReplyResult(
             text=text,
             call=_call_info(response, config.ASSISTANT_MODEL, config.ASSISTANT_EFFORT),

@@ -393,7 +393,7 @@ class ExerciseSetGenerator:
         parsed: GeneratedSet = response.parsed_output
         exercises = assemble_exercises(parsed)
         if not exercises:
-            raise AnalysisError("Claude вернул пустой набор упражнений. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент вернул пустой набор упражнений. Попробуйте ещё раз.")
         return GenerationResult(
             intro=parsed.intro.strip(),
             exercises=exercises,
@@ -453,7 +453,7 @@ class ExerciseSetGenerator:
             if p.question.strip() and p.hint.strip()
         ][: config.THEME_PROMPTS_COUNT]
         if not prompts:
-            raise AnalysisError("Claude не придумал ни одной темы. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент не придумал ни одной темы. Попробуйте ещё раз.")
         return PromptsResult(
             prompts=prompts, call=_call_info(response, config.THEME_PROMPTS_MODEL)
         )
@@ -524,7 +524,7 @@ class ExerciseSetGenerator:
             if t.question.strip() and t.hint.strip()
         ][: config.LESSON_TASKS_PER_CALL]
         if not tasks:
-            raise AnalysisError("Claude не придумал ни одного задания. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент не придумал ни одного задания. Попробуйте ещё раз.")
         return PromptsResult(
             prompts=tasks,
             call=_call_info(response, config.LESSON_TASK_MODEL, config.LESSON_TASK_EFFORT),
@@ -541,12 +541,12 @@ class ExerciseSetGenerator:
             response = client.messages.parse(timeout=self._timeout_seconds, **kwargs)
         except Exception as exc:
             raise friendly_api_error(
-                exc, "Claude API не ответил вовремя. Попробуйте ещё раз."
+                exc, "ИИ ассистент не ответил вовремя. Попробуйте ещё раз."
             ) from exc
         if getattr(response, "stop_reason", None) == "refusal":
-            raise AnalysisError("Claude отказался выполнить запрос. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент отказался выполнить запрос. Попробуйте ещё раз.")
         if getattr(response, "parsed_output", None) is None:
-            raise AnalysisError("Claude вернул ответ, который не удалось разобрать.")
+            raise AnalysisError("ИИ ассистент вернул ответ, который не удалось разобрать.")
         return response
 
 

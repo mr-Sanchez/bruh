@@ -342,7 +342,7 @@ Views.today = (() => {
       setButton.addEventListener("click", async () => {
         const status = container.querySelector('[data-role="set-status"]');
         setButton.disabled = true;
-        if (!lessonStep.set_id) status.textContent = "Claude составляет набор — обычно 10–30 секунд…";
+        if (!lessonStep.set_id) status.textContent = "ИИ ассистент составляет набор — обычно 10–30 секунд…";
         try {
           const data = lessonStep.set_id ? await Api.getSet(lessonStep.set_id) : await Api.createSet(lessonStep.lesson.key, false, picker ? picker.value() : null);
           if (root !== container) return;

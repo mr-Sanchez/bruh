@@ -204,10 +204,10 @@ class LessonTranslator:
             response = client.messages.parse(timeout=self._timeout_seconds, **kwargs)
         except Exception as exc:
             raise friendly_api_error(
-                exc, "Claude API не ответил вовремя. Попробуйте ещё раз."
+                exc, "ИИ ассистент не ответил вовремя. Попробуйте ещё раз."
             ) from exc
         if getattr(response, "stop_reason", None) == "refusal":
-            raise AnalysisError("Claude отказался выполнить запрос. Попробуйте ещё раз.")
+            raise AnalysisError("ИИ ассистент отказался выполнить запрос. Попробуйте ещё раз.")
         if getattr(response, "parsed_output", None) is None:
-            raise AnalysisError("Claude вернул ответ, который не удалось разобрать.")
+            raise AnalysisError("ИИ ассистент вернул ответ, который не удалось разобрать.")
         return response
