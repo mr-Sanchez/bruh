@@ -106,10 +106,14 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; letter-spacing:
 .tabs a.active { color: var(--text); background: var(--accent-weak); font-weight: 600; }
 .tabs a.active .icon { color: var(--accent); }
 
+/* The content column is centred in the space right of the sidebar, so wide
+   screens get even margins instead of everything hugging the left edge. */
 .app {
   flex: 1 1 auto;
   min-width: 0;
+  width: 100%;
   max-width: 1080px;
+  margin: 0 auto;
   padding: 36px 40px 80px;
 }
 
@@ -126,7 +130,8 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; letter-spacing:
 .muted { color: var(--text-muted); }
 
 .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-.row > * { flex: 1 1 200px; }
+.row > * { flex: 1 1 200px; min-width: 0; }
+.row select { width: 100%; }
 
 label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px; }
 
@@ -422,6 +427,16 @@ button.success { background: var(--success); }
   border-radius: 28px;
   color: var(--plum-text);
 }
+/* A step with several actions puts them under the text, like the current one,
+   instead of squeezing the text into a narrow column. */
+.workout-step:has(.step-action > :nth-child(2)) {
+  grid-template-areas: "mark body" ". action";
+  grid-template-columns: 44px minmax(0, 1fr);
+  row-gap: 12px;
+}
+.workout-step:has(.step-action > :nth-child(2)) .step-mark { grid-area: mark; align-self: start; }
+.workout-step:has(.step-action > :nth-child(2)) .step-body { grid-area: body; }
+.workout-step:has(.step-action > :nth-child(2)) .step-action { grid-area: action; justify-content: flex-start; }
 .is-current .step-mark { grid-area: mark; align-self: start; background: var(--gold); color: var(--on-accent); }
 .is-current .step-body { grid-area: body; }
 .is-current .step-action { grid-area: action; justify-content: flex-start; }
@@ -850,4 +865,10 @@ a.activity:hover { border-color: var(--plum-border); color: var(--text); }
   .workout-step .step-action { grid-column: 2; justify-content: flex-start; }
   .workout-step.is-current { padding: 18px; }
   .card { padding: 18px; }
+  select { max-width: 100%; }
+  button { white-space: normal; }
+  .lesson-row { flex-wrap: wrap; }
+  .roadmap-lesson .button-row { flex-wrap: wrap; }
+  .data-table th { white-space: normal; }
+  .data-table th, .data-table td { padding: 7px 4px; }
 }
