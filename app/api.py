@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import json
 import logging
 import mimetypes
 import re
@@ -323,6 +324,27 @@ def _drill_meta(
     return {"source_session_id": source.id, "passage": passage, "reference": found["text"]}
 
 
+def _parse_silences(raw: Optional[str]) -> Optional[List[List[float]]]:
+    """The silence spans the browser found in a drill take's audio, as sent:
+    a JSON list of [start, end] seconds. None when the browser could not
+    measure them - the pauses then fall back to Deepgram's word gaps."""
+    if raw is None:
+        return None
+    try:
+        spans = json.loads(raw)
+        if not isinstance(spans, list) or len(spans) > config.SILENCES_MAX:
+            raise ValueError
+        result = []
+        for span in spans:
+            start, end = (float(value) for value in span)
+            if not 0 <= start < end <= 3600:
+                raise ValueError
+            result.append([round(start, 2), round(end, 2)])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Malformed silence spans.")
+    return sorted(result)
+
+
 # ---------------------------------------------------------------- /config
 @router.get("/config")
 def get_config() -> Dict[str, Any]:
@@ -355,6 +377,7 @@ async def create_session(
     series: Optional[str] = Form(None),
     source_session_id: Optional[str] = Form(None),
     passage: Optional[int] = Form(None),
+    silences: Optional[str] = Form(None, max_length=20000),
     lesson_id: Optional[str] = Form(None, max_length=40),
     task_id: Optional[str] = Form(None, max_length=10),
     transcriber_factory: TranscriberFactory = Depends(get_transcriber_factory),
@@ -362,7 +385,8 @@ async def create_session(
     """A new take: an audio `file` (transcribed in the background) or a typed
     `text` (done at once). A picture description also carries its `image`;
     a «60 секунд» take its `prompt_id` and, from round 2 on, its `series`;
-    a shadowing take the `source_session_id` and `passage` it reads; a
+    a shadowing take the `source_session_id` and `passage` it reads (and
+    both drills the `silences` measured in their audio); a
     lesson's spoken task (a monologue) its `lesson_id` and `task_id`."""
     profile = config.profile_by_key(language)
     if kind not in config.SESSION_KINDS:
@@ -374,6 +398,9 @@ async def create_session(
         if file is None:
             raise HTTPException(status_code=400, detail="A spoken drill needs a recording.")
         drill = _drill_meta(kind, prompt_id, series, source_session_id, passage)
+        spans = _parse_silences(silences)
+        if spans is not None:
+            drill["silences"] = spans
         if kind == config.KIND_SHADOWING:
             # The passage is English whatever the source recording's language.
             profile = config.profile_by_key(config.DEFAULT_LANGUAGE_KEY)

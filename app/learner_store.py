@@ -1004,9 +1004,11 @@ def speech_report(session: utils.Session) -> Optional[Dict[str, Any]]:
         return None
     words = speech_drills.response_words(payload)
     fillers = config.profile_by_key(session.language_key).filler_words
+    # Measured in the browser from the audio; missing on older takes.
+    silences = (session.drill or {}).get("silences")
     report: Dict[str, Any] = {
-        "metrics": speech_drills.speech_metrics(words, fillers),
-        "timeline": speech_drills.timeline(words, fillers),
+        "metrics": speech_drills.speech_metrics(words, fillers, silences),
+        "timeline": speech_drills.timeline(words, fillers, silences),
     }
     if session.kind == config.KIND_SHADOWING and session.drill:
         report["reading"] = speech_drills.align_reading(

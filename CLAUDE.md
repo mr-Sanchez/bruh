@@ -104,6 +104,9 @@ in `config.py` + a `Session` property, never hard-coded at a call site.
   `lesson_task` attempt per take.
 * **Spoken drills** (`kind=talk` / `kind=shadowing`, details in `session.json`'s `drill`):
   measured, not analysed; one `filler_words_fluency` attempt is logged, `/analyze` refuses them.
+  Pauses come from silence spans the browser finds in the audio (`Recorder.findSilences`,
+  sent as `silences`, kept in `drill`) - Deepgram's word ends swallow pauses; word gaps
+  are only the fallback for older takes.
 * **Text translation** (`#/translate`): `POST /api/translate/texts` (Claude writes an English
   text in a «уклон» at a size of 5/10/15 min) or `.../texts/custom` (pasted, free) →
   `POST .../<id>/review` (Sonnet: accuracy, mistakes, unnatural spots, final version, phrases;

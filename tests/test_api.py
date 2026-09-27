@@ -865,6 +865,25 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(typed.status_code, 400)
 
+    def test_a_talk_measures_pauses_by_the_silences_sent_with_it(self) -> None:
+        # Words every 0.5 s: Deepgram's timings show no gap at all, the audio
+        # has 1.2 s of quiet inside the sentence (before "ship").
+        self._hear("So I think we should ship it today")
+        take = self._upload_drill(
+            "talk", prompt_id="it_backend:0", silences="[[1.8, 3.0], [0, 0.4], [4.5, 9]]"
+        )
+        detail = self.client.get(f"/api/sessions/{take['session_id']}").json()
+        self.assertEqual(detail["drill"]["silences"], [[0.0, 0.4], [1.8, 3.0], [4.5, 9.0]])
+        metrics = detail["speech"]["metrics"]
+        self.assertEqual((metrics["long_pauses"], metrics["longest_pause"]), (1, 1.2))
+        self.assertTrue(metrics["pauses_from_audio"])
+        self.assertEqual(detail["speech"]["timeline"][5], {"pause": 1.2})
+
+    def test_malformed_silences_are_refused(self) -> None:
+        self._hear("Okay")
+        for bad in ("nope", "{}", "[[1]]", "[[3, 2]]", "[[-1, 2]]", '[["a", 2]]'):
+            self._upload_drill("talk", expect=400, prompt_id="it_backend:0", silences=bad)
+
     def test_a_talk_without_filler_detection_is_not_scored(self) -> None:
         self._hear("Я думаю что да")
         take = self._upload_drill("talk", prompt_id="it_backend:0", language="ru")

@@ -1,4 +1,5 @@
-// Spoken drills (Stage 6) - measured from Deepgram's word timings, no Claude:
+// Spoken drills (Stage 6) - measured from Deepgram's word timings and the
+// silences in the audio (Recorder.findSilences), no Claude:
 //   #/talk[/<prompt>]            «60 секунд»: one prompt, three one-minute takes
 //                                in a row; pace, fillers and pauses per take
 //   #/shadowing[/<session>:<n>]  read a passage of your own improved_version
@@ -37,11 +38,16 @@ const Speech = (() => {
           m.fillers_per_min == null ? "считаются только в английском" : fillerNote(m.filler_breakdown) || "ни одного"
         )}
         ${tile(
-          "Паузы ≥ 2 с",
+          "Паузы",
           num(m.long_pauses),
-          m.longest_pause ? `самая длинная ${escapeHtml(m.longest_pause)} с` : "без долгих пауз"
+          `${m.longest_pause ? `самая длинная ${escapeHtml(m.longest_pause)} с` : "без долгих пауз"}
+           · ≥ 1 с внутри фразы, ≥ 2 с между${m.pauses_from_audio === false ? " · по словам Deepgram, неточно" : ""}`
         )}
-        ${tile("Повторы", num(m.repeats), "«I I think»")}
+        ${tile(
+          "Повторы",
+          num(m.repeats),
+          (m.repeat_examples || []).map((r) => `«${escapeHtml(r)}»`).join(", ") || "без повторов"
+        )}
         ${m.fluency_score == null ? "" : tile("Беглость", `${Math.round(m.fluency_score * 100)}%`, "паразиты + паузы в минуту")}
       </div>`;
   }
@@ -143,8 +149,9 @@ const Speech = (() => {
       <p id="message" class="muted"></p>`;
   }
 
-  // Wires the controls in `root` to a Recorder: records, uploads with
-  // `upload(blob, seconds)`, polls the session and hands it to `onDone`.
+  // Wires the controls in `root` to a Recorder: records, finds the silences,
+  // uploads with `upload(blob, seconds, silences)`, polls the session and
+  // hands it to `onDone`. `silences` is a JSON string, or null if unmeasured.
   function wireRecorder(root, { maxSeconds, countdown, upload, onDone, onStart }) {
     const badge = root.querySelector("#status-badge");
     const timer = root.querySelector("#timer");
@@ -173,7 +180,8 @@ const Speech = (() => {
         bar.style.width = "0%";
         status("Распознаётся...", "transcribing");
         try {
-          const result = await upload(blob, durationSeconds);
+          const spans = await Recorder.findSilences(blob);
+          const result = await upload(blob, durationSeconds, spans && JSON.stringify(spans));
           if (result.status === "error") throw new Error(result.detail || "Не удалось обработать запись.");
           poll(result.session_id);
         } catch (err) {
@@ -264,7 +272,7 @@ Views.talk = (() => {
         <div id="prompt-slot"></div>
         <p class="muted">Говорите ровно минуту — запись остановится сама. Потом ещё
           ${rounds - 1} раза на ту же тему: с каждым разом должно получаться глаже. Считаем темп,
-          слова-паразиты и долгие паузы по распознанной речи — без Claude, только Deepgram.
+          слова-паразиты (Deepgram) и паузы (по самой записи) — без Claude.
           Первая попытка идёт в тему «Слова-паразиты и беглость».</p>
         ${cfg.deepgram_configured ? "" : `<p class="muted">DEEPGRAM_API_KEY не настроен — запись не распознается.</p>`}
         ${Speech.controlsHtml(`Попытка 1 из ${rounds}`)}
@@ -287,7 +295,7 @@ Views.talk = (() => {
       onStart: () => {
         if (prompts) prompts.lock();
       },
-      upload: async (blob, seconds) => {
+      upload: async (blob, seconds, silences) => {
         const prompt = prompts && prompts.current();
         if (!prompt && !series) throw new Error("Сначала выберите тему для рассказа.");
         const result = await Api.uploadSession(blob, {
@@ -295,7 +303,7 @@ Views.talk = (() => {
           durationSeconds: seconds,
           mimeType: blob.type,
           kind: "talk",
-          drill: { prompt_id: prompt ? prompt.id : null, series },
+          drill: { prompt_id: prompt ? prompt.id : null, series, silences },
         });
         if (!series) series = result.session_id;
         return result;
@@ -335,7 +343,7 @@ Views.talk = (() => {
     const rows = [
       ["Темп, сл/мин", (m) => m.wpm],
       ["Паразиты / мин", (m) => m.fillers_per_min],
-      ["Паузы ≥ 2 с", (m) => m.long_pauses],
+      ["Паузы", (m) => m.long_pauses],
       ["Повторы", (m) => m.repeats],
       ["Слов", (m) => m.words],
     ];
@@ -435,13 +443,17 @@ Views.shadowing = (() => {
     controls = Speech.wireRecorder(container, {
       maxSeconds: 180,
       onStart: () => window.speechSynthesis && window.speechSynthesis.cancel(),
-      upload: (blob, seconds) =>
+      upload: (blob, seconds, silences) =>
         Api.uploadSession(blob, {
           language: "en-US",
           durationSeconds: seconds,
           mimeType: blob.type,
           kind: "shadowing",
-          drill: { source_session_id: passages[current].session_id, passage: passages[current].index },
+          drill: {
+            source_session_id: passages[current].session_id,
+            passage: passages[current].index,
+            silences,
+          },
         }),
       onDone: (session) => {
         const p = passages[current];

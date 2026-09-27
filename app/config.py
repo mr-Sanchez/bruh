@@ -360,9 +360,15 @@ FLUENCY_TOPIC: Final[str] = "filler_words_fluency"
 FILLER_TOKENS: Final[frozenset] = frozenset(
     {"uh", "um", "mhmm", "mm-mm", "uh-uh", "uh-huh", "nuh-uh", "hmm", "mm"}
 )
-# A silence between two words at least this long counts as a hesitation;
-# shorter ones are ordinary breaths and sentence breaks.
+# A silence counts as a hesitation from this long inside a sentence, and
+# from LONG_PAUSE_SECONDS at a sentence break (where a breath is normal).
+# Silences come from the audio itself, measured in the browser: Deepgram
+# stretches a word's end over the quiet after it, so gaps between its word
+# timings run well short of the real pause (a 1.3 s pause shows as ~0.9 s).
+MID_PAUSE_SECONDS: Final[float] = 1.0
 LONG_PAUSE_SECONDS: Final[float] = 2.0
+# What the browser may report: silence spans (start, end) in seconds.
+SILENCES_MAX: Final[int] = 400
 # Talk score: hesitations (fillers + long pauses) per speaking minute. At or
 # under the first number the score is 1.0, at the second it is 0; linear in
 # between, so the 0.8 pass mark sits at 4 per minute.

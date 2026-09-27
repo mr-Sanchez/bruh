@@ -5,8 +5,9 @@
 //     .start(deviceId)  - ask for the mic and start; throws if access fails
 //     .stop()           - finish; onStop({ blob, durationSeconds }) follows
 //     .dispose()        - stop everything without calling onStop
-// Duration is measured here, in the browser, on purpose: the server never
-// decodes audio.
+//   Recorder.findSilences(blob)        - quiet spans of a recording, for pauses
+// Duration and silences are measured here, in the browser, on purpose: the
+// server never decodes audio.
 const Recorder = (() => {
   function pickMimeType() {
     const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg"];
@@ -122,5 +123,52 @@ const Recorder = (() => {
     };
   }
 
-  return { create, fillMics };
+  // Quiet spans of a recording as [[start, end], ...] seconds, or null when
+  // the audio cannot be decoded or has too little contrast to tell speech from
+  // silence. Loudness is taken per 20 ms frame; the line between quiet and
+  // speech sits 30% of the way from the room's noise (10th percentile) to
+  // speech (95th), so it adapts to the mic. A blip under 0.2 s (a click, a
+  // breath) does not break a silence; spans under 0.3 s are left out.
+  async function findSilences(blob) {
+    const FRAME = 0.02;
+    try {
+      const Offline = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      const audio = await new Offline(1, 1, 16000).decodeAudioData(await blob.arrayBuffer());
+      const samples = audio.getChannelData(0);
+      const hop = Math.round(audio.sampleRate * FRAME);
+      const frames = Math.floor(samples.length / hop);
+      if (frames < 50) return null;
+      const db = new Float32Array(frames);
+      for (let f = 0; f < frames; f++) {
+        let sum = 0;
+        for (let i = f * hop; i < (f + 1) * hop; i++) sum += samples[i] * samples[i];
+        db[f] = 10 * Math.log10(sum / hop + 1e-10);
+      }
+      const sorted = Float32Array.from(db).sort();
+      const floor = sorted[Math.floor(frames * 0.1)];
+      const speech = sorted[Math.floor(frames * 0.95)];
+      if (speech - floor < 12) return null;
+      const line = floor + 0.3 * (speech - floor);
+      const spans = [];
+      for (let f = 0; f < frames; ) {
+        if (db[f] >= line) {
+          f++;
+          continue;
+        }
+        const start = f;
+        while (f < frames && db[f] < line) f++;
+        const last = spans[spans.length - 1];
+        if (last && start * FRAME - last[1] <= 0.2) last[1] = f * FRAME;
+        else spans.push([start * FRAME, f * FRAME]);
+      }
+      return spans
+        .filter(([a, b]) => b - a >= 0.3)
+        .slice(0, 400)
+        .map(([a, b]) => [Math.round(a * 100) / 100, Math.round(b * 100) / 100]);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  return { create, fillMics, findSilences };
 })();

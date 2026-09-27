@@ -3,9 +3,12 @@
 Both drills cost only the Deepgram call - nothing here goes to Claude:
 
   * «60 секунд» (talk): a minute on one prompt, three times in a row. Measured
-    are words per minute, fillers and long pauses per minute - all counted from
-    the verbatim transcript's words and their start/end times, so the app still
-    never decodes audio itself.
+    are words per minute, fillers and long pauses per minute - counted from
+    the verbatim transcript's words and their start/end times, plus the
+    silence spans the browser found in the audio (the server still never
+    decodes audio). Deepgram's word ends swallow part of each pause, so the
+    audio's silences are what pauses are measured by; word gaps are only the
+    fallback for takes recorded without them.
   * shadowing: a passage of the learner's own improved_version read aloud,
     then aligned word by word with what Deepgram heard - missed, misheard and
     unclear (low-confidence) words are marked.
@@ -16,9 +19,10 @@ itself is never touched. Like app.learner_model, this module does no I/O.
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app import config
 
@@ -65,29 +69,65 @@ def is_filler(word: Dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------- metrics
-def speech_metrics(words: Sequence[Dict[str, Any]], fillers_detected: bool) -> Dict[str, Any]:
+Silences = Optional[Sequence[Sequence[float]]]
+
+
+def _ends_sentence(word: Dict[str, Any]) -> bool:
+    return word["text"].rstrip("\"')»").endswith((".", "!", "?", "…"))
+
+
+def pauses(words: Sequence[Dict[str, Any]], silences: Silences = None) -> List[Tuple[int, float]]:
+    """The hesitation pauses of a take: (index of the word after it, seconds).
+
+    `silences` are the quiet spans the browser found in the audio; each one
+    falls between the words around its midpoint, and spans between the same
+    two words (a breath in the middle) make one pause. None - a take recorded
+    before silences were measured - falls back to the gaps between Deepgram's
+    word timings, which run short. A pause counts from MID_PAUSE_SECONDS
+    inside a sentence and from LONG_PAUSE_SECONDS after one; silence before
+    the first word and after the last is not a pause.
+    """
+    spans: Dict[int, Tuple[float, float]] = {}
+    if silences is None:
+        for index in range(1, len(words)):
+            spans[index] = (words[index - 1]["end"], words[index]["start"])
+    elif words:
+        starts = [w["start"] for w in words]
+        for start, end in silences:
+            index = bisect.bisect_left(starts, (start + end) / 2)
+            if 0 < index < len(words):
+                low, high = spans.get(index, (start, end))
+                spans[index] = (min(low, start), max(high, end))
+    found = []
+    for index, (start, end) in sorted(spans.items()):
+        after_sentence = _ends_sentence(words[index - 1])
+        limit = config.LONG_PAUSE_SECONDS if after_sentence else config.MID_PAUSE_SECONDS
+        if end - start >= limit:
+            found.append((index, round(end - start, 2)))
+    return found
+
+
+def speech_metrics(
+    words: Sequence[Dict[str, Any]], fillers_detected: bool, silences: Silences = None
+) -> Dict[str, Any]:
     """Pace and hesitations of one take.
 
     `fillers_detected` is whether the take was transcribed with filler_words
     (English only): without it Deepgram drops "uh"/"um", so a filler count
     would read as a perfect 0 - it is reported as None instead, and no
-    fluency score is given.
+    fluency score is given. `silences`: see pauses().
 
     Speaking time runs from the first word to the last, so silence before
     the first word and after the last one does not lower the pace.
     """
     fillers = [w for w in words if is_filler(w)] if fillers_detected else []
     content = [w for w in words if not (fillers_detected and is_filler(w))]
-    pauses = [
-        round(nxt["start"] - prev["end"], 2)
-        for prev, nxt in zip(words, words[1:])
-        if nxt["start"] - prev["end"] >= config.LONG_PAUSE_SECONDS
-    ]
-    repeats = sum(
-        1
+    lengths = [seconds for _, seconds in pauses(words, silences)]
+    repeated = [
+        f"{_bare(prev)} {_bare(nxt)}"
         for prev, nxt in zip(content, content[1:])
         if _norm(prev["word"]) and _norm(prev["word"]) == _norm(nxt["word"])
-    )
+    ]
     seconds = max(0.0, words[-1]["end"] - words[0]["start"]) if words else 0.0
     minutes = seconds / 60.0
 
@@ -99,7 +139,7 @@ def speech_metrics(words: Sequence[Dict[str, Any]], fillers_detected: bool) -> D
         key = _norm(word["word"])
         breakdown[key] = breakdown.get(key, 0) + 1
 
-    hesitations = per_minute(len(fillers) + len(pauses))
+    hesitations = per_minute(len(fillers) + len(lengths))
     return {
         "speaking_seconds": round(seconds, 1),
         "words": len(content),
@@ -107,10 +147,12 @@ def speech_metrics(words: Sequence[Dict[str, Any]], fillers_detected: bool) -> D
         "fillers": len(fillers) if fillers_detected else None,
         "fillers_per_min": per_minute(len(fillers)) if fillers_detected else None,
         "filler_breakdown": breakdown if fillers_detected else None,
-        "long_pauses": len(pauses),
-        "longest_pause": max(pauses) if pauses else None,
-        "pauses_per_min": per_minute(len(pauses)),
-        "repeats": repeats,
+        "long_pauses": len(lengths),
+        "longest_pause": max(lengths) if lengths else None,
+        "pauses_per_min": per_minute(len(lengths)),
+        "pauses_from_audio": silences is not None,
+        "repeats": len(repeated),
+        "repeat_examples": list(dict.fromkeys(repeated))[:3],
         "hesitations_per_min": hesitations,
         "fluency_score": (
             fluency_score(hesitations) if fillers_detected and hesitations is not None else None
@@ -124,14 +166,15 @@ def fluency_score(hesitations_per_min: float) -> float:
     return round(min(1.0, max(0.0, 1.0 - (hesitations_per_min - target) / (zero - target))), 3)
 
 
-def timeline(words: Sequence[Dict[str, Any]], fillers_detected: bool) -> List[Dict[str, Any]]:
+def timeline(
+    words: Sequence[Dict[str, Any]], fillers_detected: bool, silences: Silences = None
+) -> List[Dict[str, Any]]:
     """The transcript as tokens for display: fillers flagged, long pauses in place."""
+    before = dict(pauses(words, silences))
     tokens: List[Dict[str, Any]] = []
     for index, word in enumerate(words):
-        if index:
-            gap = word["start"] - words[index - 1]["end"]
-            if gap >= config.LONG_PAUSE_SECONDS:
-                tokens.append({"pause": round(gap, 1)})
+        if index in before:
+            tokens.append({"pause": round(before[index], 1)})
         token: Dict[str, Any] = {"text": word["text"]}
         if fillers_detected and is_filler(word):
             token["filler"] = True

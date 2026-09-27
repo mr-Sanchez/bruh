@@ -96,9 +96,33 @@ class SpeechMetricsTests(unittest.TestCase):
         self.assertIsNone(metrics["fluency_score"])
         self.assertEqual(metrics["words"], 4)
 
-    def test_counts_immediate_repeats(self) -> None:
+    def test_counts_immediate_repeats_with_examples(self) -> None:
         metrics = speech_drills.speech_metrics(timed_words("I I think the the plan"), True)
         self.assertEqual(metrics["repeats"], 2)
+        self.assertEqual(metrics["repeat_examples"], ["I I", "the the"])
+
+    def test_pauses_come_from_the_audio_silences(self) -> None:
+        # Words every 0.5 s from 1.0 s, so Deepgram's word gaps are all 0.1 s.
+        words = timed_words("We went there. Then we left home", gaps={0: 1.0})
+        silences = [[0.0, 0.9], [1.3, 2.5], [1.5, 3.3], [3.1, 3.6], [4.2, 9.0]]
+        # 1.3-2.5 falls before "there.": 1.2 s inside a sentence, a pause;
+        # 1.5-3.3 before "Then", after "there.": under 2 s at a sentence break;
+        # 3.1-3.6 is short; the first and last are outside the speech.
+        self.assertEqual(speech_drills.pauses(words, silences), [(2, 1.2)])
+        metrics = speech_drills.speech_metrics(words, True, silences)
+        self.assertEqual((metrics["long_pauses"], metrics["pauses_from_audio"]), (1, True))
+        tokens = speech_drills.timeline(words, True, silences)
+        self.assertEqual(tokens[2], {"pause": 1.2})
+
+    def test_spans_between_the_same_two_words_are_one_pause(self) -> None:
+        # A breath splits the quiet after "there." in two: 1.5-3.9 is 2.4 s.
+        words = timed_words("We went there. Then", gaps={3: 3.0})
+        self.assertEqual(speech_drills.pauses(words, [[1.5, 2.8], [3.0, 3.9]]), [(3, 2.4)])
+
+    def test_without_silences_word_gaps_are_the_fallback(self) -> None:
+        words = timed_words("We went there. Then we left", gaps={2: 1.1, 3: 1.5})
+        self.assertEqual(speech_drills.pauses(words), [(2, 1.2)])
+        self.assertFalse(speech_drills.speech_metrics(words, True)["pauses_from_audio"])
 
     def test_no_words_gives_empty_metrics(self) -> None:
         metrics = speech_drills.speech_metrics([], True)
