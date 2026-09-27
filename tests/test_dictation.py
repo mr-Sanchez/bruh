@@ -296,6 +296,19 @@ class SubtitleChoiceTests(unittest.TestCase):
 
         self.assertEqual(youtube.pick_subtitle_track(info, ["en"]), ("en-US", youtube.MANUAL))
 
+    def test_the_original_automatic_track_wins_over_a_translated_one(self) -> None:
+        translated = [{"ext": "vtt", "url": "https://x/api/timedtext?lang=en-orig&tlang=en"}]
+        original = [{"ext": "vtt", "url": "https://x/api/timedtext?lang=en"}]
+        info = {
+            "subtitles": {},
+            "automatic_captions": {"en": translated, "en-orig": original},
+            "language": "en-US",
+        }
+        self.assertEqual(youtube.pick_subtitle_track(info, ["en"]), ("en-orig", youtube.AUTOMATIC))
+        info["automatic_captions"] = {"en": translated}
+        with self.assertRaises(youtube.NoSubtitlesError):
+            youtube.pick_subtitle_track(info, ["en"])
+
     def test_automatic_captions_are_the_fallback(self) -> None:
         info = {"subtitles": {}, "automatic_captions": {"en": []}, "language": "en"}
 

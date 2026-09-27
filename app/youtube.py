@@ -37,6 +37,7 @@ _URL_PATTERNS: Tuple[re.Pattern, ...] = (
 )
 _BARE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _SUBTITLE_SUFFIX = ".vtt"
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 MANUAL = "manual"
 AUTOMATIC = "automatic"
@@ -107,7 +108,11 @@ def pick_subtitle_track(
     Manual captions in any wanted language win. Automatic captions are only
     accepted in the video's own language: YouTube offers machine
     translations of them into every language, and those do not match a
-    single word of what is actually being said.
+    single word of what is actually being said. Even in the video's own
+    language the plain track ("en") is often such a translation of the
+    original recognition ("en-orig", its URL carries `tlang=`) - and YouTube
+    answers those with 429 Too Many Requests (2026-09-27) - so the original
+    track comes first and a translated one is never taken.
     """
     manual = info.get("subtitles") or {}
     automatic = info.get("automatic_captions") or {}
@@ -119,11 +124,26 @@ def pick_subtitle_track(
     for wanted in languages:
         if spoken and not _language_matches(spoken, wanted):
             continue
-        for track in automatic:
-            if _language_matches(track, wanted):
-                return track, AUTOMATIC
+        tracks = [
+            track
+            for track in automatic
+            if _language_matches(track, wanted) and not _is_translation(automatic[track])
+        ]
+        # "en-orig" before "en": the untouched recognition of what is said.
+        tracks.sort(key=lambda track: not track.lower().endswith("-orig"))
+        if tracks:
+            return tracks[0], AUTOMATIC
     raise NoSubtitlesError(
         "У этого видео нет субтитров на нужном языке — возьмите другое видео."
+    )
+
+
+def _is_translation(formats: Any) -> bool:
+    """A caption track YouTube machine-translates from another one (tlang=)."""
+    return any(
+        "tlang=" in str(fmt.get("url") or "")
+        for fmt in (formats or [])
+        if isinstance(fmt, dict)
     )
 
 
@@ -202,6 +222,8 @@ class YouTubeFetcher:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            # yt-dlp's ANSI colours would end up in the learner's error message.
+            "color": {"stdout": "never", "stderr": "never"},
             "noplaylist": True,
             "retries": 3,
             "socket_timeout": 30,
@@ -215,7 +237,13 @@ class YouTubeFetcher:
             raise
         except Exception as exc:  # yt-dlp raises its own hierarchy
             logger.warning("yt-dlp failed for %s: %s", url, exc)
-            raise DownloadFailedError(f"Не удалось скачать видео: {exc}") from exc
+            message = _ANSI.sub("", str(exc)).removeprefix("ERROR: ").strip()
+            if "429" in message:
+                raise DownloadFailedError(
+                    "YouTube временно ограничил загрузки (429 Too Many Requests). "
+                    "Подождите несколько минут и попробуйте ещё раз."
+                ) from exc
+            raise DownloadFailedError(f"Не удалось скачать видео: {message}") from exc
         if not isinstance(info, dict):
             raise DownloadFailedError("YouTube не вернул данные о видео.")
         if info.get("entries"):  # a link to a playlist resolved to its first video
