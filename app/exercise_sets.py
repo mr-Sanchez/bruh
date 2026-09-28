@@ -420,7 +420,12 @@ class ExerciseSetGenerator:
         response = self._call(
             model=config.GRADING_MODEL,
             max_tokens=config.GRADING_MAX_TOKENS,
-            system=_grading_prompt(),
+            # The prompt (rules + the whole taxonomy, ~5k tokens) is the same on
+            # every call and card checks come a minute or so apart, so it is
+            # cached: a warm check pays ~10% for it instead of the full price.
+            system=[
+                {"type": "text", "text": _grading_prompt(), "cache_control": {"type": "ephemeral"}}
+            ],
             messages=[{"role": "user", "content": "\n".join(lines)}],
             output_format=Grading,
             output_config={"effort": config.GRADING_EFFORT},

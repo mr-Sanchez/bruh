@@ -300,38 +300,20 @@ const Drill = (() => {
     return stop;
   }
 
-  // Where a mistake card came from: the learner's own mistake and the rule
-  // behind it, shown only after the answer - the card itself is a new
-  // sentence on the same rule.
+  // The rule behind a mistake card, shown only after the answer - the card
+  // itself is a new sentence on the same rule. The learner's old wrong answer
+  // (the quote, its correction, where it came from) is left out on purpose:
+  // it pulls attention away from the sentence just answered.
   function cardSource(item) {
     const c = item.content || {};
-    const first = (item.occurrences || [])[0] || {};
-    const date = escapeHtml((first.at || "").slice(0, 10));
-    const origin = first.session_id
-      ? `Из вашей записи от ${date} · <a href="#/session/${encodeURIComponent(first.session_id)}">открыть</a>`
-      : `Из AI-набора от ${date}`;
-    const better = (c.better_versions || []).filter(Boolean);
+    if (!c.focus) return "";
     const examples = (c.focus_examples || []).filter(Boolean);
     return `
       <div class="card-source">
-        <p class="muted">${origin}</p>
-        <p class="quote">✕ «${escapeHtml(c.quote)}»</p>
-        <p class="correction">✓ ${escapeHtml(c.correction)}</p>
-        ${c.explanation ? `<p>${escapeHtml(c.explanation)}</p>` : ""}
-        ${
-          c.focus
-            ? `<div class="pattern-box">
-                 <div class="pattern-rule">Правило: ${escapeHtml(c.focus)}</div>
-                 ${examples.map((e) => `<div class="pattern-example">${escapeHtml(e)}</div>`).join("")}
-               </div>`
-            : ""
-        }
-        ${
-          better.length
-            ? `<div class="better-versions"><span class="muted">Проще / естественнее:</span>
-                 <ul>${better.map((v) => `<li>${escapeHtml(v)}</li>`).join("")}</ul></div>`
-            : ""
-        }
+        <div class="pattern-box">
+          <div class="pattern-rule">Правило: ${escapeHtml(c.focus)}</div>
+          ${examples.map((e) => `<div class="pattern-example">${escapeHtml(e)}</div>`).join("")}
+        </div>
       </div>`;
   }
 

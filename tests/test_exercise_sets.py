@@ -173,8 +173,10 @@ class GradeTests(unittest.TestCase):
         call = messages.calls[0]
         self.assertEqual(call["model"], config.GRADING_MODEL)
         self.assertEqual(call["output_config"], {"effort": config.GRADING_EFFORT})
-        self.assertIn('"sentence_structure"', call["system"])  # the taxonomy to tag from
-        self.assertNotIn("{taxonomy}", call["system"])
+        (system,) = call["system"]
+        self.assertEqual(system["cache_control"], {"type": "ephemeral"})  # same on every check
+        self.assertIn('"sentence_structure"', system["text"])  # the taxonomy to tag from
+        self.assertNotIn("{taxonomy}", system["text"])
         self.assertIn("Learner: I fixed it.", call["messages"][0]["content"])
         self.assertEqual(set(result.verdicts), {"ex5", "ex6"})
         self.assertFalse(result.verdicts["ex6"]["correct"])
